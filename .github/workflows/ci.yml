@@ -74,3 +74,15 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/
+    - name: Packaging artifacts for nightly build
+      run: |
+        FNAME="Meshroom_macOS_"`git rev-parse HEAD`.zip
+        zip -r "${FNAME}" build/bin
+        ls -lh "${FNAME}"
+        echo "FNAME=$FNAME" >> $GITHUB_ENV
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: meshroom
+        path: ${FNAME}
+        retention-days: 5
