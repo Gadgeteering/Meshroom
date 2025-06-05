@@ -1,15 +1,16 @@
-import QtQuick 2.9
-import QtQuick.Controls 2.3
-import QtQuick.Layouts 1.3
-import MaterialIcons 2.2
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
 
-import Utils 1.0
 import Controls 1.0
+import MaterialIcons 2.2
+import Utils 1.0
 
 /**
  * FeaturesInfoOverlay is an overlay that displays info and
  * provides controls over a FeaturesViewer component.
  */
+
 FloatingPane {
     id: root
 
@@ -18,17 +19,31 @@ FloatingPane {
     property var mfeatures: null
     property var mtracks: null
     property var msfmdata: null
+    property var featuresNodeName: ""
+    property var tracksNodeName: ""
+    property var sfmdataNodeName: ""
 
     ColumnLayout {
         // Header
         RowLayout {
+            ColumnLayout {
             // Node used to read features
-            Label {
-                text: _reconstruction ? _reconstruction.activeNodes.get("featureProvider").node.label : ""
-                Layout.fillWidth: true
+                Label {
+                    text: "Features Provider: " + featuresNodeName
+                    Layout.fillWidth: true
+                }
+                Label {
+                    text: "Tracks Provider: " + tracksNodeName
+                    Layout.fillWidth: true
+                }
+                Label {
+                    text: "SfMData Provider: " + sfmdataNodeName
+                    Layout.fillWidth: true
+                }
             }
             // Settings menu
             Loader {
+                Layout.alignment: Qt.AlignTop
                 active: root.pluginStatus === Loader.Ready
                 sourceComponent: MaterialToolButton {
                     text: MaterialIcons.settings
@@ -52,9 +67,9 @@ FloatingPane {
                                 from: 0
                                 to: 1
                                 first.value: 0
-                                first.onMoved: { root.featuresViewer.featureMinScaleFilter = Math.pow(first.value,4); }
+                                first.onMoved: { root.featuresViewer.featureMinScaleFilter = Math.pow(first.value,4) }
                                 second.value: 1
-                                second.onMoved: { root.featuresViewer.featureMaxScaleFilter = Math.pow(second.value,4); }
+                                second.onMoved: { root.featuresViewer.featureMaxScaleFilter = Math.pow(second.value,4) }
                                 stepSize: 0.01
                             }
                         }
@@ -65,7 +80,10 @@ FloatingPane {
                             ComboBox {
                                 id: featureDisplayModeCB
                                 flat: true
-                                ToolTip.text: "Feature Display Mode:\n* Points: Simple points.\n* Square: Scaled filled squares.\n* Oriented Square: Scaled and oriented squares."
+                                ToolTip.text: "Feature Display Mode:\n" +
+                                              "* Points: Simple points.\n" +
+                                              "* Square: Scaled filled squares.\n" +
+                                              "* Oriented Square: Scaled and oriented squares."
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
@@ -81,7 +99,10 @@ FloatingPane {
                             ComboBox {
                                 id: trackDisplayModeCB
                                 flat: true
-                                ToolTip.text: "Track Display Mode:\n* Lines Only: Only track lines.\n* Current Matches: Track lines with current matches / landmarks.\n* All Matches: Track lines with all matches / landmarks."
+                                ToolTip.text: "Track Display Mode:\n" +
+                                              "* Lines Only: Only track lines.\n" +
+                                              "* Current Matches: Track lines with current matches/landmarks.\n" +
+                                              "* All Matches: Track lines with all matches / landmarks."
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
@@ -100,7 +121,7 @@ FloatingPane {
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
-                                checked: root.featuresViewer.trackContiguousFilter
+                                checked: root.featuresViewer ? root.featuresViewer.trackContiguousFilter : false
                                 onClicked: root.featuresViewer.trackContiguousFilter = trackContiguousFilterCB.checked
                             }
                         }
@@ -114,13 +135,13 @@ FloatingPane {
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
-                                checked: root.featuresViewer.trackInliersFilter
+                                checked: root.featuresViewer ? root.featuresViewer.trackInliersFilter : false
                                 onClicked: root.featuresViewer.trackInliersFilter = trackInliersFilterCB.checked
                             }
                         }
                         RowLayout {
                             Label {
-                                text: "Display 3d Tracks:"
+                                text: "Display 3D Tracks:"
                             }
                             CheckBox {
                                 id: display3dTracksCB
@@ -128,7 +149,7 @@ FloatingPane {
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
-                                checked: root.featuresViewer.display3dTracks
+                                checked: root.featuresViewer ? root.featuresViewer.display3dTracks : false
                                 onClicked: root.featuresViewer.display3dTracks = display3dTracksCB.checked
                             }
                         }
@@ -142,7 +163,7 @@ FloatingPane {
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
-                                checked: root.featuresViewer.displayTrackEndpoints
+                                checked: root.featuresViewer ? root.featuresViewer.displayTrackEndpoints : false
                                 onClicked: root.featuresViewer.displayTrackEndpoints = displayTrackEndpointsCB.checked
                             }
                         }
@@ -152,30 +173,32 @@ FloatingPane {
                             }
                             SpinBox {
                                 id: timeWindowSB
-                                ToolTip.text: "Time Window: The number of frames to consider for tracks display.\ne.g. With time window set at x, tracks will start at current frame - x and they will end at  current frame + x."
+                                ToolTip.text: "Time Window: The number of frames to consider for tracks display.\n" +
+                                              "e.g. With time window set at x, tracks will start at current frame - x and they will end at  current frame + x."
                                 ToolTip.visible: hovered
                                 Layout.fillHeight: true
                                 Layout.alignment: Qt.AlignRight
                                 from: -1
                                 to: 50
-                                value: root.featuresViewer.timeWindow
+                                value: root.featuresViewer ? root.featuresViewer.timeWindow : 0
                                 stepSize: 1
                                 editable: true
 
                                 textFromValue: function(value, locale) {
-                                    if (value == -1) return "No Limit";
-                                    if (value ==  0) return "Disable";
-                                    return value;
+                                    if (value === -1) return "No Limit"
+                                    if (value ===  0) return "Disable"
+                                    return value
                                 }
 
                                 valueFromText: function(text, locale) {
-                                    if (text == "No Limit") return -1;
-                                    if (text == "Disable")  return 0;
-                                    return Number.fromLocaleString(locale, text);
+                                    if (text === "No Limit") return -1
+                                    if (text === "Disable")  return 0
+                                    return Number.fromLocaleString(locale, text)
                                 }
 
                                 onValueChanged: {
-                                    root.featuresViewer.timeWindow = timeWindowSB.value;
+                                    if (root.featuresViewer)
+                                        root.featuresViewer.timeWindow = timeWindowSB.value
                                 }
                             }
                         }
@@ -211,7 +234,7 @@ FloatingPane {
                     text: MaterialIcons.center_focus_strong
                     ToolTip.text: "Display Extracted Features"
                     onClicked: {
-                        featureType.viewer.displayFeatures = featuresVisibilityButton.checked;
+                        featureType.viewer.displayFeatures = featuresVisibilityButton.checked
                     }
                     font.pointSize: 10
                     opacity: featureType.viewer.visible ? 1.0 : 0.6
@@ -224,8 +247,8 @@ FloatingPane {
                     text: MaterialIcons.timeline
                     ToolTip.text: "Display Tracks"
                     onClicked: {
-                        featureType.viewer.displayTracks = tracksVisibilityButton.checked;
-                        root.featuresViewer.enableTimeWindow = tracksVisibilityButton.checked;
+                        featureType.viewer.displayTracks = tracksVisibilityButton.checked
+                        root.featuresViewer.enableTimeWindow = tracksVisibilityButton.checked
                     }
                     font.pointSize: 10
                 }
@@ -237,7 +260,7 @@ FloatingPane {
                     text: MaterialIcons.sync
                     ToolTip.text: "Display Matches"
                     onClicked: {
-                        featureType.viewer.displayMatches = matchesVisibilityButton.checked;
+                        featureType.viewer.displayMatches = matchesVisibilityButton.checked
                     }
                     font.pointSize: 10
                 }
@@ -249,7 +272,7 @@ FloatingPane {
                     text: MaterialIcons.fiber_manual_record
                     ToolTip.text: "Display Landmarks"
                     onClicked: {
-                        featureType.viewer.displayLandmarks = landmarksVisibilityButton.checked;
+                        featureType.viewer.displayLandmarks = landmarksVisibilityButton.checked
                     }
                     font.pointSize: 10
                 }
@@ -260,7 +283,9 @@ FloatingPane {
                     colors: root.featuresViewer.colors
                     currentIndex: featureType.viewer.colorIndex
                     // offset featuresViewer color set when changing the color of one feature type
-                    onColorPicked: featureType.viewer.colorOffset = colorIndex - index
+                    onColorPicked: function(colorIndex) {
+                        featureType.viewer.colorOffset = colorIndex - index
+                    }
                 }
                 // Feature type name
                 Label {

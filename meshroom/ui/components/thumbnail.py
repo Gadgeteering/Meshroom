@@ -1,7 +1,7 @@
 from meshroom.common import Signal
 
-from PySide2.QtCore import QObject, Slot, QSize, QUrl, Qt, QStandardPaths
-from PySide2.QtGui import QImageReader, QImageWriter
+from PySide6.QtCore import QObject, Slot, QSize, QUrl, Qt, QStandardPaths
+from PySide6.QtGui import QImageReader, QImageWriter
 
 import os
 from pathlib import Path
@@ -61,6 +61,10 @@ class ThumbnailCache(QObject):
     requests = []
     cleaningThread = None
     workerThreads = ThreadPool(processes=3)
+
+    def __del__(self):
+        self.workerThreads.terminate()
+        self.workerThreads.join()
 
     @staticmethod
     def initialize():
@@ -256,7 +260,7 @@ class ThumbnailCache(QObject):
         # Check if thumbnail already exists (it may have been created by another thread)
         if ThumbnailCache.checkThumbnail(path):
             self.thumbnailCreated.emit(imgSource, callerID)
-            return
+            return path
 
         logging.debug(f'[ThumbnailCache] Creating thumbnail {path} for image {imgPath}')
 
@@ -269,7 +273,7 @@ class ThumbnailCache(QObject):
         img = reader.read()
         if img.isNull():
             logging.error(f'[ThumbnailCache] Error when reading image: {reader.errorString()}')
-            return
+            return ""
 
         # Scale image while preserving aspect ratio
         thumbnail = img.scaled(ThumbnailCache.thumbnailSize,
@@ -284,6 +288,7 @@ class ThumbnailCache(QObject):
 
         # Notify listeners
         self.thumbnailCreated.emit(imgSource, callerID)
+        return path
 
     def handleRequestsAsync(self):
         """Process thumbnail creation requests in LIFO order.

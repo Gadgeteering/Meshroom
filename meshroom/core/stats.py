@@ -6,7 +6,6 @@ import time
 import threading
 import platform
 import os
-import sys
 
 import xml.etree.ElementTree as ET
 
@@ -25,8 +24,8 @@ def bytes2human(n):
     for s in reversed(symbols):
         if n >= prefix[s]:
             value = float(n) / prefix[s]
-            return '%.2f %s' % (value, s)
-    return '%.2f B' % (n)
+            return f'{value:.2f} {s}'
+    return f'{n:.2f} B'
 
 
 class ComputerStatistics:
@@ -52,13 +51,13 @@ class ComputerStatistics:
         self.ramTotal = psutil.virtual_memory().total / (1024*1024*1024)
 
         if platform.system() == "Windows":
-            from distutils import spawn
+            import shutil
             # If the platform is Windows and nvidia-smi
-            self.nvidia_smi = spawn.find_executable('nvidia-smi')
+            self.nvidia_smi = shutil.which('nvidia-smi')
             if self.nvidia_smi is None:
-                # could not be found from the environment path,
+                # Could not be found from the environment path,
                 # try to find it from system drive with default installation path
-                default_nvidia_smi = "%s\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe" % os.environ['systemdrive']
+                default_nvidia_smi = f"{os.environ['systemdrive']}\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"
                 if os.path.isfile(default_nvidia_smi):
                     self.nvidia_smi = default_nvidia_smi
         else:
@@ -77,21 +76,22 @@ class ComputerStatistics:
     def update(self):
         try:
             self.initOnFirstTime()
-            self._addKV('cpuUsage', psutil.cpu_percent(percpu=True)) # interval=None => non-blocking (percentage since last call)
+            # Interval=None => non-blocking (percentage since last call)
+            self._addKV('cpuUsage', psutil.cpu_percent(percpu=True))
             self._addKV('ramUsage', psutil.virtual_memory().percent)
             self._addKV('swapUsage', psutil.swap_memory().percent)
             self._addKV('vramUsage', 0)
             self._addKV('ioCounters', psutil.disk_io_counters())
             self.updateGpu()
         except Exception as e:
-            logging.debug('Failed to get statistics: "{}".'.format(str(e)))
+            logging.debug(f'Failed to get statistics: "{e}".')
 
     def updateGpu(self):
         if not self.nvidia_smi:
             return
         try:
             p = subprocess.Popen([self.nvidia_smi, "-q", "-x"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            xmlGpu, stdError = p.communicate(timeout=10) # 10 seconds
+            xmlGpu, stdError = p.communicate(timeout=10)  # 10 seconds
 
             smiTree = ET.fromstring(xmlGpu)
             gpuTree = smiTree.find('gpu')
@@ -99,38 +99,38 @@ class ComputerStatistics:
             try:
                 self.gpuName = gpuTree.find('product_name').text
             except Exception as e:
-                logging.debug('Failed to get gpuName: "{}".'.format(str(e)))
+                logging.debug(f'Failed to get gpuName: "{e}".')
                 pass
             try:
                 gpuMemoryUsed = gpuTree.find('fb_memory_usage').find('used').text.split(" ")[0]
                 self._addKV('gpuMemoryUsed', gpuMemoryUsed)
             except Exception as e:
-                logging.debug('Failed to get gpuMemoryUsed: "{}".'.format(str(e)))
+                logging.debug(f'Failed to get gpuMemoryUsed: "{e}".')
                 pass
             try:
                 self.gpuMemoryTotal = gpuTree.find('fb_memory_usage').find('total').text.split(" ")[0]
             except Exception as e:
-                logging.debug('Failed to get gpuMemoryTotal: "{}".'.format(str(e)))
+                logging.debug(f'Failed to get gpuMemoryTotal: "{e}".')
                 pass
             try:
                 gpuUsed = gpuTree.find('utilization').find('gpu_util').text.split(" ")[0]
                 self._addKV('gpuUsed', gpuUsed)
             except Exception as e:
-                logging.debug('Failed to get gpuUsed: "{}".'.format(str(e)))
+                logging.debug(f'Failed to get gpuUsed: "{e}".')
                 pass
             try:
                 gpuTemperature = gpuTree.find('temperature').find('gpu_temp').text.split(" ")[0]
                 self._addKV('gpuTemperature', gpuTemperature)
             except Exception as e:
-                logging.debug('Failed to get gpuTemperature: "{}".'.format(str(e)))
+                logging.debug(f'Failed to get gpuTemperature: "{e}".')
                 pass
         except subprocess.TimeoutExpired as e:
-            logging.debug('Timeout when retrieving information from nvidia_smi: "{}".'.format(str(e)))
+            logging.debug(f'Timeout when retrieving information from nvidia_smi: "{e}".')
             p.kill()
             outs, errs = p.communicate()
             return
         except Exception as e:
-            logging.debug('Failed to get information from nvidia_smi: "{}".'.format(str(e)))
+            logging.debug(f'Failed to get information from nvidia_smi: "{e}".')
             return
 
     def toDict(self):
@@ -139,6 +139,7 @@ class ComputerStatistics:
     def fromDict(self, d):
         for k, v in d.items():
             setattr(self, k, v)
+
 
 class ProcStatistics:
     staticKeys = [
@@ -201,7 +202,7 @@ class ProcStatistics:
         for k, v in data.items():
             self._addKV(k, v)
 
-        ## Note: Do not collect stats about open files for now,
+        # Note: Do not collect stats about open files for now,
         #        as there is bug in psutil-5.7.2 on Windows which crashes the application.
         #        https://github.com/giampaolo/psutil/issues/1763
         #
@@ -262,22 +263,22 @@ class Statistics:
     def fromDict(self, d):
         version = d.get('fileVersion', 0.0)
         if version != self.fileVersion:
-            logging.debug('Statistics: file version was {} and the current version is {}.'.format(version, self.fileVersion))
+            logging.debug(f'Statistics: file version was {version} and the current version is {self.fileVersion}.')
         self.computer = ComputerStatistics()
         self.process = ProcStatistics()
         self.times = []
         try:
             self.computer.fromDict(d.get('computer', {}))
         except Exception as e:
-            logging.debug('Failed while loading statistics: computer: "{}".'.format(str(e)))
+            logging.debug(f'Failed while loading statistics: computer: "{e}".')
         try:
             self.process.fromDict(d.get('process', {}))
         except Exception as e:
-            logging.debug('Failed while loading statistics: process: "{}".'.format(str(e)))
+            logging.debug(f'Failed while loading statistics: process: "{e}".')
         try:
             self.times = d.get('times', [])
         except Exception as e:
-            logging.debug('Failed while loading statistics: times: "{}".'.format(str(e)))
+            logging.debug(f'Failed while loading statistics: times: "{e}".')
 
 
 bytesPerGiga = 1024. * 1024. * 1024.

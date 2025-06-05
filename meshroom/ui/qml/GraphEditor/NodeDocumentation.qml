@@ -1,13 +1,13 @@
-import QtQuick 2.11
-import QtQuick.Controls 2.3
-import QtQuick.Layouts 1.3
-import Controls 1.0
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
 
-import "common.js" as Common
+import Controls 1.0
 
 /**
  * Displays Node documentation
  */
+
 FocusScope {
     id: root
 

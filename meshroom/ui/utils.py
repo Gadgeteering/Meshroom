@@ -1,12 +1,12 @@
 import os
 import time
 
-from PySide2.QtCore import QFileSystemWatcher, QUrl, Slot, QTimer, Property, QObject
-from PySide2.QtQml import QQmlApplicationEngine
+from PySide6.QtCore import QFileSystemWatcher, QUrl, Slot, QTimer, Property, QObject
+from PySide6.QtQml import QQmlApplicationEngine
 try:
-    from PySide2 import shiboken2
-except:
-    import shiboken2
+    from PySide6 import shiboken6
+except Exception:
+    import shiboken6
 
 
 class QmlInstantEngine(QQmlApplicationEngine):
@@ -21,7 +21,7 @@ class QmlInstantEngine(QQmlApplicationEngine):
         watching -- Defines whether the watcher is active (default: True)
         verbose -- if True, output log infos (default: False)
         """
-        super(QmlInstantEngine, self).__init__(parent)
+        super().__init__(parent)
 
         self._fileWatcher = QFileSystemWatcher()  # Internal Qt File Watcher
         self._sourceFile = ""
@@ -51,7 +51,7 @@ class QmlInstantEngine(QQmlApplicationEngine):
 
     def load(self, sourceFile):
         self._sourceFile = sourceFile
-        super(QmlInstantEngine, self).load(sourceFile)
+        super().load(sourceFile)
 
     def setWatching(self, watchValue):
         """
@@ -102,7 +102,7 @@ class QmlInstantEngine(QQmlApplicationEngine):
 
         # Make sure the file exists
         if not os.path.isfile(filename):
-            raise ValueError("addFile: file %s doesn't exist." % filename)
+            raise ValueError(f"addFile: file {filename} doesn't exist.")
 
         # Return if the file is already in our internal list
         if filename in self._watchedFiles:
@@ -135,7 +135,7 @@ class QmlInstantEngine(QQmlApplicationEngine):
         recursive -- if True, will search inside each subdirectories recursively.
         """
         if not os.path.isdir(dirname):
-            raise RuntimeError("addFilesFromDirectory : %s is not a valid directory." % dirname)
+            raise RuntimeError(f"addFilesFromDirectory : {dirname} is not a valid directory.")
 
         if recursive:
             for dirpath, dirnames, filenames in os.walk(dirname):
@@ -193,7 +193,7 @@ class QmlInstantEngine(QQmlApplicationEngine):
         QTimer.singleShot(200, lambda: self.addFile(filepath))
 
     def reload(self):
-        print("Reloading {}".format(self._sourceFile))
+        print(f"Reloading {self._sourceFile}")
         self.load(self._sourceFile)
 
 
@@ -237,7 +237,7 @@ def makeProperty(T, attributeName, notify=None, resetOnDestroy=False):
             setattr(instance, resetCallbackName, lambda self=instance, *args: setter(self, None))
         resetCallback = getattr(instance, resetCallbackName, None)
 
-        if resetCallback and currentValue and shiboken2.isValid(currentValue):
+        if resetCallback and currentValue and shiboken6.isValid(currentValue):
             currentValue.destroyed.disconnect(resetCallback)
         setattr(instance, attributeName, value)
         if resetCallback and value:

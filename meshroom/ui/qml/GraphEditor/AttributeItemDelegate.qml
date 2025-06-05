@@ -1,31 +1,55 @@
-import QtQuick 2.9
-import QtQuick.Layouts 1.3
-import QtQuick.Controls 2.2
-import QtQuick.Dialogs 1.0
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import QtQuick.Dialogs
+
 import MaterialIcons 2.2
 import Utils 1.0
+import Controls 1.0
+import "AttributeControls" as AttributeControls
 
 /**
-  Instantiate a control to visualize and edit an Attribute based on its type.
-*/
+ * Instantiate a control to visualize and edit an Attribute based on its type.
+ */
+
 RowLayout {
     id: root
 
     property variant attribute: null
-    property bool readOnly: false // whether the attribute's value can be modified
+    property bool readOnly: false  // Whether the attribute's value can be modified
+    property bool objectsHideable: true
+    property string filterText: ""
 
-    property alias label: parameterLabel  // accessor to the internal Label (attribute's name)
-    property int labelWidth               // shortcut to set the fixed size of the Label
+    property alias label: parameterLabel  // Accessor to the internal Label (attribute's name)
+    property int labelWidth               // Shortcut to set the fixed size of the Label
 
     readonly property bool editable: !attribute.isOutput && !attribute.isLink && !readOnly
 
     signal doubleClicked(var mouse, var attr)
+    signal inAttributeClicked(var srcItem, var mouse, var inAttributes)
+    signal outAttributeClicked(var srcItem, var mouse, var outAttributes)
+    signal showInViewer(var attr)
 
     spacing: 2
 
+    function updateAttributeLabel() {
+        background.color = attribute.validValue ?  Qt.darker(palette.window, 1.1) : Qt.darker(Colors.red, 1.5)
+
+        if (attribute.desc) {
+            var tooltip = ""
+            if (!attribute.validValue && attribute.desc.errorMessage !== "")
+                tooltip += "<i><b>Error: </b>" + Format.plainToHtml(attribute.desc.errorMessage) + "</i><br><br>"
+            tooltip += "<b> " + attribute.desc.name + ":</b> " + attribute.type + "<br>" + Format.plainToHtml(attribute.desc.description)
+
+            parameterTooltip.text = tooltip
+        }
+    }
 
     Pane {
-        background: Rectangle { color: Qt.darker(parent.palette.window, 1.1) }
+        background: Rectangle {
+            id: background
+            color: object != undefined && object.validValue ? Qt.darker(parent.palette.window, 1.1) : Qt.darker(Colors.red, 1.5)
+        }
         padding: 0
         Layout.preferredWidth: labelWidth || implicitWidth
         Layout.fillHeight: true
@@ -34,47 +58,109 @@ RowLayout {
             spacing: 0
             width: parent.width
             height: parent.height
+
+            // In connection
+            MaterialToolButton {
+                id: navButtonIn
+
+                property bool shouldBeVisible: (object != undefined && object.isLinkNested)
+
+                text: MaterialIcons.login
+                enabled: shouldBeVisible
+                font.pointSize: 8
+                Layout.fillHeight: true
+                visible: shouldBeVisible
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+
+                    onClicked: function(mouse) {
+                        root.inAttributeClicked(navButtonIn, mouse, object.linkedInAttributes)
+                    }
+                }
+
+            }
+
             Label {
                 id: parameterLabel
 
                 Layout.fillHeight: true
                 Layout.fillWidth: true
                 horizontalAlignment: attribute.isOutput ? Qt.AlignRight : Qt.AlignLeft
+                verticalAlignment: Text.AlignVCenter
                 elide: Label.ElideRight
                 padding: 5
                 wrapMode: Label.WrapAtWordBoundaryOrAnywhere
 
-                text: attribute.label
+                text: object.label
+
+                color: {
+                    if (object != undefined && (object.hasOutputConnections || object.isLink) && !object.enabled)
+                        return Colors.lightgrey
+                    else
+                        return palette.text
+                }
 
                 // Tooltip hint with attribute's description
-                ToolTip.text: "<b>" + object.desc.name + "</b><br>" + Format.plainToHtml(object.desc.description)
-                ToolTip.visible: parameterMA.containsMouse
-                ToolTip.delay: 800
+                ToolTip {
+                    id: parameterTooltip
 
-                // make label bold if attribute's value is not the default one
+                    // Position in y at mouse position
+                    y: parameterMA.mouseY + 10
+
+                    text: {
+                        var tooltip = ""
+                        if (!object.validValue && object.desc.errorMessage !== "")
+                            tooltip += "<i><b>Error: </b>" + Format.plainToHtml(object.desc.errorMessage) + "</i><br><br>"
+                        tooltip += "<b>" + object.desc.name + ":</b> " + attribute.type + "<br>" + Format.plainToHtml(object.description)
+                        return tooltip
+                    }
+                    visible: parameterMA.containsMouse
+                    delay: 800
+                }
+
+                // Make label bold if attribute's value is not the default one
                 font.bold: !object.isOutput && !object.isDefault
 
-                // make label italic if attribute is a link
+                // Make label italic if attribute is a link
                 font.italic: object.isLink
-
 
                 MouseArea {
                     id: parameterMA
                     anchors.fill: parent
                     hoverEnabled: true
                     acceptedButtons: Qt.AllButtons
-                    onDoubleClicked: root.doubleClicked(mouse, root.attribute)
+                    onDoubleClicked: function(mouse) { root.doubleClicked(mouse, root.attribute) }
 
                     property Component menuComp: Menu {
                         id: paramMenu
 
-                        property bool isFileAttribute: attribute.type == "File"
+                        property bool isFileAttribute: attribute.type === "File"
                         property bool isFilepath: isFileAttribute && Filepath.isFile(attribute.evalValue)
 
                         MenuItem {
                             text: "Reset To Default Value"
                             enabled: root.editable && !attribute.isDefault
-                            onTriggered: _reconstruction.resetAttribute(attribute)
+                            onTriggered: {
+                                _reconstruction.resetAttribute(attribute)
+                                updateAttributeLabel()
+                            }
+                        }
+                        MenuItem {
+                            text: "Copy"
+                            enabled: attribute.value != ""
+                            onTriggered: {
+                                Clipboard.clear()
+                                Clipboard.setText(attribute.value)
+                            }
+                        }
+                        MenuItem {
+                            text: "Paste"
+                            enabled: Clipboard.getText() != "" && root.editable
+                            onTriggered: {
+                                _reconstruction.setAttribute(attribute, Clipboard.getText())
+                            }
                         }
 
                         MenuSeparator {
@@ -94,14 +180,25 @@ RowLayout {
                             visible: paramMenu.isFilepath
                             height: visible ? implicitHeight : 0
                             text: "Open File"
-                            onClicked: Qt.openUrlExternally(Filepath.stringToUrl(attribute.value))
+                            onClicked: Qt.openUrlExternally(Filepath.stringToUrl(attribute.evalValue))
                         }
+
+                        MenuItem { 
+                            visible: attribute.isOutput && (attribute.is2D || attribute.is3D)
+                            height: visible ? implicitHeight : 0
+                            text: {
+                                if (attribute.is2D)
+                                    return "Show in 2D Viewer"
+                                return "Show in 3D Viewer"
+                            }
+                            onClicked: root.showInViewer(attribute)
+                        }
+
                     }
 
-                    onClicked: {
+                    onClicked: function(mouse) {
                         forceActiveFocus()
-                        if(mouse.button == Qt.RightButton)
-                        {
+                        if (mouse.button == Qt.RightButton) {
                             var menu = menuComp.createObject(parameterLabel)
                             menu.parent = parameterLabel
                             menu.popup()
@@ -109,6 +206,42 @@ RowLayout {
                     }
                 }
             }
+
+            MaterialLabel {
+                property bool isDisplayable: attribute.isOutput && (attribute.is2D || attribute.is3D)
+                property bool isDisplayed: attribute === _reconstruction.displayedAttr2D || _reconstruction.displayedAttrs3D.count && _reconstruction.displayedAttrs3D.contains(attribute)
+                text: isDisplayed ? MaterialIcons.visibility : MaterialIcons.visibility_off
+                enabled: isDisplayed
+                visible: isDisplayable
+                ToolTip.text: `This attribute is displayable in the ${attribute.is2D ? "2D" : "3D"} viewer.`
+
+                padding: 4
+                font.pointSize: 8
+            }
+
+            MaterialToolButton {
+                id: navButtonOut
+
+                property bool shouldBeVisible: (attribute != undefined && attribute.hasOutputConnections)
+
+                text: MaterialIcons.logout
+                font.pointSize: 8
+                enabled: shouldBeVisible
+                Layout.fillHeight: true
+                visible: shouldBeVisible
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+
+                    onClicked: function(mouse) {
+                        root.outAttributeClicked(navButtonOut, mouse, attribute.linkedOutAttributes)
+                    }
+                }
+
+
+            }
+
             MaterialLabel {
                 visible: attribute.desc.advanced
                 text: MaterialIcons.build
@@ -119,22 +252,23 @@ RowLayout {
         }
     }
 
-    function setTextFieldAttribute(value)
-    {
+    function setTextFieldAttribute(value) {
         // editingFinished called even when TextField is readonly
-        if(!editable)
+        if (!editable)
             return
-        switch(attribute.type)
-        {
-        case "IntParam":
-        case "FloatParam":
-            _reconstruction.setAttribute(root.attribute, Number(value))
-            break;
-        case "File":
-            _reconstruction.setAttribute(root.attribute, value)
-            break;
-        default:
-            _reconstruction.setAttribute(root.attribute, value.trim())
+        switch (attribute.type) {
+            case "IntParam":
+            case "FloatParam":
+                _reconstruction.setAttribute(root.attribute, Number(value))
+                updateAttributeLabel()
+                break
+            case "File":
+                _reconstruction.setAttribute(root.attribute, value)
+                break
+            default:
+                _reconstruction.setAttribute(root.attribute, value.trim())
+                updateAttributeLabel()
+                break
         }
     }
 
@@ -142,63 +276,188 @@ RowLayout {
         Layout.fillWidth: true
 
         sourceComponent: {
-            switch(attribute.type)
-            {
-            case "ChoiceParam": return attribute.desc.exclusive ? comboBox_component : multiChoice_component
-            case "IntParam": return slider_component
-            case "FloatParam":
-                if(attribute.desc.semantic === 'color/hue')
-                    return color_hue_component 
-                return slider_component
-            case "BoolParam": return checkbox_component
-            case "ListAttribute": return listAttribute_component
-            case "GroupAttribute": return groupAttribute_component
-            case "StringParam":
-                if (attribute.desc.semantic === 'multiline')
-                    return textArea_component
-                return textField_component
-            case "ColorParam":
-                return color_component
-            default: return textField_component
+            // PushButtonParam always has value == undefined, so it needs to be excluded from this check
+            if (attribute.type != "PushButtonParam" && attribute.value === undefined) {
+                return notComputedComponent
+            }
+            switch (attribute.type) {
+                case "PushButtonParam":
+                    return pushButtonComponent
+                case "ChoiceParam":
+                    return attribute.desc.exclusive ? choiceComponent : choiceMultiComponent
+                case "IntParam": return sliderComponent
+                case "FloatParam":
+                    if (attribute.desc.semantic === 'color/hue')
+                        return colorHueComponent
+                    return sliderComponent
+                case "BoolParam":
+                    return checkboxComponent
+                case "ListAttribute":
+                    return listAttributeComponent
+                case "GroupAttribute":
+                    return groupAttributeComponent
+                case "StringParam":
+                    if (attribute.desc.semantic.includes('multiline'))
+                        return textAreaComponent
+                    return textFieldComponent
+                case "ColorParam":
+                    return colorComponent
+                default:
+                    return textFieldComponent
             }
         }
 
         Component {
-            id: textField_component
+            id: notComputedComponent
+            MaterialLabel {
+                anchors.fill: parent
+                text: MaterialIcons.do_not_disturb_alt
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                padding: 4
+                background: Rectangle {
+                    anchors.fill: parent
+                    border.width: 0
+                    radius: 20
+                    color: Qt.darker(palette.window, 1.1)
+                }
+            }
+        }
+
+        Component {
+            id: pushButtonComponent
+            Button {
+                text: attribute.label
+                enabled: root.editable
+                onClicked: {
+                    attribute.clicked()
+                }
+            }
+        }
+
+        Component {
+            id: textFieldComponent
             TextField {
+                id: textField
                 readOnly: !root.editable
                 text: attribute.value
+
+                // Don't disable the component to keep interactive features (text selection, context menu...).
+                // Only override the look by using the Disabled palette.
+                SystemPalette { 
+                    id: disabledPalette
+                    colorGroup: SystemPalette.Disabled
+                }
+
+                states: [
+                    State {
+                        when: readOnly
+                        PropertyChanges {
+                            target: textField
+                            color: disabledPalette.text
+                        }
+                    }
+                ]
+
                 selectByMouse: true
                 onEditingFinished: setTextFieldAttribute(text)
+                persistentSelection: false
+
                 onAccepted: {
                     setTextFieldAttribute(text)
-                    root.forceActiveFocus()
+                    parameterLabel.forceActiveFocus()
+                }
+                Keys.onPressed: function(event) {
+                    if ((event.key == Qt.Key_Escape)) {
+                        event.accepted = true
+                        parameterLabel.forceActiveFocus()
+                    }
                 }
                 Component.onDestruction: {
-                    if(activeFocus)
+                    if (activeFocus)
                         setTextFieldAttribute(text)
                 }
                 DropArea {
                     enabled: root.editable
                     anchors.fill: parent
-                    onDropped: {
-                        if(drop.hasUrls)
+                    onDropped: function(drop) {
+                        if (drop.hasUrls)
                             setTextFieldAttribute(Filepath.urlToString(drop.urls[0]))
-                        else if(drop.hasText && drop.text != '')
+                        else if (drop.hasText && drop.text != '')
                             setTextFieldAttribute(drop.text)
                     }
+                }
+                onPressed: (event) => {
+                    if(event.button == Qt.RightButton) {
+                        // Keep selection persistent while context menu is open to 
+                        // visualize what is being copied or what will be replaced on paste.
+                        persistentSelection = true;
+                        const menu = textFieldMenuComponent.createObject(textField);
+                        menu.popup();
+
+                        if(selectedText === "") {
+                            cursorPosition = positionAt(event.x, event.y);
+                        }
+                    }
+                }
+
+                Component {
+                    id: textFieldMenuComponent
+                    Menu {
+                        onOpened: {
+                            // Keep cursor visible to see where pasting would happen.
+                            textField.cursorVisible = true;
+                        }
+                        onClosed: {
+                            // Disable selection persistency behavior once menu is closed and
+                            // give focus back to the parent TextField.
+                            textField.persistentSelection = false;
+                            textField.forceActiveFocus();
+                            destroy();
+                        }
+                        MenuItem {
+                            text: "Copy"
+                            enabled: attribute.value != ""
+                            onTriggered: {
+                                const hasSelection = textField.selectionStart !== textField.selectionEnd;
+                                if(hasSelection) {
+                                    // Use `TextField.copy` to copy only the current selection.
+                                    textField.copy();
+                                }
+                                else {
+                                    Clipboard.setText(attribute.value);
+                                }
+                            }
+                        }
+                        MenuItem {
+                            text: "Paste"
+                            enabled: !readOnly
+                            onTriggered: {
+                                const clipboardText = Clipboard.getText();
+                                if (clipboardText.length === 0) {
+                                    return;
+                                }
+                                const before = textField.text.substr(0, textField.selectionStart);
+                                const after = textField.text.substr(textField.selectionEnd, textField.text.length);
+                                const updatedValue = before + clipboardText + after;
+                                setTextFieldAttribute(updatedValue);
+                                // Set the cursor at the end of the added text
+                                textField.cursorPosition = before.length + clipboardText.length;
+                            }
+                        }
+                    } 
                 }
             }
         }
 
         Component {
-            id: textArea_component
+            id: textAreaComponent
 
             Rectangle {
                 // Fixed background for the flickable object
                 color: palette.base
                 width: parent.width
-                height: 70
+                height: attribute.desc.semantic.includes("large") ? 400 : 70
 
                 Flickable {
                     width: parent.width
@@ -206,9 +465,7 @@ RowLayout {
                     contentWidth: width
                     contentHeight: height
 
-                    ScrollBar.vertical: ScrollBar {
-                        policy: ScrollBar.AlwaysOn
-                    }
+                    ScrollBar.vertical: MScrollBar {}
 
                     TextArea.flickable: TextArea {
                         wrapMode: Text.WordWrap
@@ -243,16 +500,20 @@ RowLayout {
         }
 
         Component {
-            id: color_component
+            id: colorComponent
             RowLayout {
                 CheckBox {
-                    id: color_checkbox
+                    id: colorCheckbox
                     Layout.alignment: Qt.AlignLeft
                     checked: node && node.color === "" ? false : true
+                    checkable: root.editable
                     text: "Custom Color"
                     onClicked: {
-                        if(checked) {
-                            _reconstruction.setAttribute(attribute, "#0000FF")
+                        if (checked) {
+                            if (colorText.text == "")
+                                _reconstruction.setAttribute(attribute, "#0000FF")
+                            else
+                                _reconstruction.setAttribute(attribute, colorText.text)
                         } else {
                             _reconstruction.setAttribute(attribute, "")
                         }
@@ -262,14 +523,14 @@ RowLayout {
                     id: colorText
                     Layout.alignment: Qt.AlignLeft
                     implicitWidth: 100
-                    enabled: color_checkbox.checked
-                    visible: enabled
-                    text: enabled ? attribute.value : ""
+                    enabled: colorCheckbox.checked && root.editable
+                    visible: colorCheckbox.checked
+                    text: colorCheckbox.checked ? attribute.value : ""
                     selectByMouse: true
                     onEditingFinished: setTextFieldAttribute(text)
                     onAccepted: setTextFieldAttribute(text)
                     Component.onDestruction: {
-                        if(activeFocus)
+                        if (activeFocus)
                             setTextFieldAttribute(text)
                     }
                 }
@@ -278,10 +539,11 @@ RowLayout {
                     height: colorText.height
                     width: colorText.width / 2
                     Layout.alignment: Qt.AlignLeft
-                    visible: color_checkbox.checked
-                    color: color_checkbox.checked ? attribute.value : ""
+                    visible: colorCheckbox.checked
+                    color: colorCheckbox.checked ? colorDialog.selectedColor : ""
 
                     MouseArea {
+                        enabled: root.editable
                         anchors.fill: parent
                         onClicked: colorDialog.open()
                     }
@@ -290,9 +552,9 @@ RowLayout {
                 ColorDialog {
                     id: colorDialog
                     title: "Please choose a color"
-                    color: attribute.value
+                    selectedColor: colorText.text
                     onAccepted: {
-                        colorText.text = color
+                        colorText.text = colorDialog.selectedColor
                         // Artificially trigger change of attribute value
                         colorText.editingFinished()
                         close()
@@ -307,43 +569,41 @@ RowLayout {
         }
 
         Component {
-            id: comboBox_component
-            ComboBox {
-                id: combo
+            id: choiceComponent
+
+            AttributeControls.Choice {
+                value: root.attribute.value
+                values: root.attribute.values
                 enabled: root.editable
-                model: attribute.desc.values
-                Component.onCompleted: currentIndex = find(attribute.value)
-                onActivated: _reconstruction.setAttribute(attribute, currentText)
-                Connections {
-                    target: attribute
-                    onValueChanged: combo.currentIndex = combo.find(attribute.value)
+
+                onEditingFinished: (value) => {
+                    _reconstruction.setAttribute(root.attribute, value)
                 }
             }
         }
 
         Component {
-            id: multiChoice_component
-            Flow {
-                Repeater {
-                    id: checkbox_repeater
-                    model: attribute.desc.values
-                    delegate: CheckBox {
-                        enabled: root.editable
-                        text: modelData
-                        checked: attribute.value.indexOf(modelData) >= 0
-                        onToggled: {
-                            var t = attribute.value
-                            if(!checked) { t.splice(t.indexOf(modelData), 1) } // remove element
-                            else { t.push(modelData) }                         // add element
-                            _reconstruction.setAttribute(attribute, t)
-                        }
+            id: choiceMultiComponent
+
+            AttributeControls.ChoiceMulti {
+                value: root.attribute.value
+                values: root.attribute.values
+                enabled: root.editable
+                customValueColor: Colors.orange
+                onToggled: (value, checked) => {
+                    var currentValue = root.attribute.value;
+                    if (!checked) {
+                        currentValue.splice(currentValue.indexOf(value), 1);
+                    } else {
+                        currentValue.push(value);
                     }
+                    _reconstruction.setAttribute(attribute, currentValue);
                 }
             }
         }
 
         Component {
-            id: slider_component
+            id: sliderComponent
             RowLayout {
                 TextField {
                     IntValidator {
@@ -351,12 +611,12 @@ RowLayout {
                     }
                     DoubleValidator {
                         id: doubleValidator
-                        locale: 'C'  // use '.' decimal separator disregarding the system locale
+                        locale: 'C'  // Use '.' decimal separator disregarding the system locale
                     }
                     implicitWidth: 100
                     Layout.fillWidth: !slider.active
                     enabled: root.editable
-                    // cast value to string to avoid intrusive scientific notations on numbers
+                    // Cast value to string to avoid intrusive scientific notations on numbers
                     property string displayValue: String(slider.active && slider.item.pressed ? slider.item.formattedValue : attribute.value)
                     text: displayValue
                     selectByMouse: true
@@ -364,16 +624,17 @@ RowLayout {
                     // When the value change keep the text align to the left to be able to read the most important part
                     // of the number. When we are editing (item is in focus), the content should follow the editing.
                     autoScroll: activeFocus
-                    validator: attribute.type == "FloatParam" ? doubleValidator : intValidator
+                    validator: attribute.type === "FloatParam" ? doubleValidator : intValidator
                     onEditingFinished: setTextFieldAttribute(text)
                     onAccepted: {
                         setTextFieldAttribute(text)
+
                         // When the text is too long, display the left part
                         // (with the most important values and cut the floating point details)
                         ensureVisible(0)
                     }
                     Component.onDestruction: {
-                        if(activeFocus)
+                        if (activeFocus)
                             setTextFieldAttribute(text)
                     }
                     Component.onCompleted: {
@@ -398,17 +659,18 @@ RowLayout {
                         snapMode: Slider.SnapAlways
 
                         onPressedChanged: {
-                            if(!pressed)
+                            if (!pressed) {
                                 _reconstruction.setAttribute(attribute, formattedValue)
+                                updateAttributeLabel()
+                            }
                         }
                     }
                 }
-
             }
         }
 
         Component {
-            id: checkbox_component
+            id: checkboxComponent
             Row {
                 CheckBox {
                     enabled: root.editable
@@ -419,17 +681,17 @@ RowLayout {
         }
 
         Component {
-            id: listAttribute_component
+            id: listAttributeComponent
             ColumnLayout {
-                id: listAttribute_layout
+                id: listAttributeLayout
                 width: parent.width
                 property bool expanded: false
                 RowLayout {
                     spacing: 4
                     ToolButton {
-                        text: listAttribute_layout.expanded  ? MaterialIcons.keyboard_arrow_down : MaterialIcons.keyboard_arrow_right
+                        text: listAttributeLayout.expanded  ? MaterialIcons.keyboard_arrow_down : MaterialIcons.keyboard_arrow_right
                         font.family: MaterialIcons.fontFamily
-                        onClicked: listAttribute_layout.expanded = !listAttribute_layout.expanded
+                        onClicked: listAttributeLayout.expanded = !listAttributeLayout.expanded
                     }
                     Label {
                         Layout.alignment: Qt.AlignVCenter
@@ -446,42 +708,52 @@ RowLayout {
                 }
                 ListView {
                     id: lv
-                    model: listAttribute_layout.expanded ? attribute.value : undefined
-                    visible: model != undefined && count > 0
+                    model: listAttributeLayout.expanded ? attribute.value : undefined
+                    visible: model !== undefined && count > 0
                     implicitHeight: Math.min(contentHeight, 300)
                     Layout.fillWidth: true
                     Layout.margins: 4
                     clip: true
                     spacing: 4
 
-                    ScrollBar.vertical: ScrollBar { id: sb }
+                    ScrollBar.vertical: MScrollBar { id: sb }
 
-                    delegate:  RowLayout {
-                        id: item
-                        property var childAttrib: object
-                        layoutDirection: Qt.RightToLeft
-                        width: lv.width - sb.width
-                        Component.onCompleted: {
-                            var cpt = Qt.createComponent("AttributeItemDelegate.qml")
-                            var obj = cpt.createObject(item,
-                                                       {'attribute': Qt.binding(function() { return item.childAttrib }),
-                                                        'readOnly': Qt.binding(function() { return !root.editable })
-                                                       })
-                            obj.Layout.fillWidth = true
-                            obj.label.text = index
-                            obj.label.horizontalAlignment = Text.AlignHCenter
-                            obj.label.verticalAlignment = Text.AlignVCenter
-                            obj.doubleClicked.connect(function(attr) {root.doubleClicked(attr)})
-                        }
-                        ToolButton {
-                            enabled: root.editable
-                            text: MaterialIcons.remove_circle_outline
-                            font.family: MaterialIcons.fontFamily
-                            font.pointSize: 11
-                            padding: 2
-                            ToolTip.text: "Remove Element"
-                            ToolTip.visible: hovered
-                            onClicked: _reconstruction.removeAttribute(item.childAttrib)
+                    delegate: Loader {
+                        active: !objectsHideable
+                            || ((object.isDefault && GraphEditorSettings.showDefaultAttributes || !object.isDefault && GraphEditorSettings.showModifiedAttributes)
+                            && (object.isLinkNested && GraphEditorSettings.showLinkAttributes || !object.isLinkNested && GraphEditorSettings.showNotLinkAttributes))
+                        visible: active
+                        height: implicitHeight
+                        sourceComponent: RowLayout {
+                            id: item
+                            property var childAttrib: object
+                            layoutDirection: Qt.RightToLeft
+                            width: lv.width - sb.width
+                            Component.onCompleted: {
+                                var cpt = Qt.createComponent("AttributeItemDelegate.qml")
+                                var obj = cpt.createObject(item,
+                                                        {
+                                                            'attribute': Qt.binding(function() { return item.childAttrib }),
+                                                            'readOnly': Qt.binding(function() { return !root.editable })
+                                                        })
+                                obj.Layout.fillWidth = true
+                                obj.label.text = index
+                                obj.label.horizontalAlignment = Text.AlignHCenter
+                                obj.label.verticalAlignment = Text.AlignVCenter
+                                obj.doubleClicked.connect(function(attr) { root.doubleClicked(attr) })
+                                obj.inAttributeClicked.connect(function(srcItem, mouse, inAttributes) { root.inAttributeClicked(srcItem, mouse, inAttributes) })
+                                obj.outAttributeClicked.connect(function(srcItem, mouse, outAttributes) { root.outAttributeClicked(srcItem, mouse, outAttributes) })
+                            }
+                            ToolButton {
+                                enabled: root.editable
+                                text: MaterialIcons.remove_circle_outline
+                                font.family: MaterialIcons.fontFamily
+                                font.pointSize: 11
+                                padding: 2
+                                ToolTip.text: "Remove Element"
+                                ToolTip.visible: hovered
+                                onClicked: _reconstruction.removeAttribute(item.childAttrib)
+                            }
                         }
                     }
                 }
@@ -489,15 +761,18 @@ RowLayout {
         }
 
         Component {
-            id: groupAttribute_component
+            id: groupAttributeComponent
             ColumnLayout {
                 id: groupItem
                 Component.onCompleted:  {
                     var cpt = Qt.createComponent("AttributeEditor.qml");
                     var obj = cpt.createObject(groupItem,
-                                               {'model': Qt.binding(function() { return attribute.value }),
-                                                'readOnly': Qt.binding(function() { return root.readOnly }),
-                                                'labelWidth': 100, // reduce label width for children (space gain)
+                                               {
+                                                   'model': Qt.binding(function() { return attribute.value }),
+                                                   'readOnly': Qt.binding(function() { return root.readOnly }),
+                                                   'labelWidth': 100,  // Reduce label width for children (space gain)
+                                                   'objectsHideable': Qt.binding(function() { return root.objectsHideable }),
+                                                   'filterText': Qt.binding(function() { return root.filterText }),
                                                })
                     obj.Layout.fillWidth = true;
                     obj.attributeDoubleClicked.connect(function(attr) {root.doubleClicked(attr)})
@@ -506,22 +781,22 @@ RowLayout {
         }
 
         Component {
-            id: color_hue_component
+            id: colorHueComponent
             RowLayout {
                 TextField {
                     implicitWidth: 100
                     enabled: root.editable
-                    // cast value to string to avoid intrusive scientific notations on numbers
+                    // Cast value to string to avoid intrusive scientific notations on numbers
                     property string displayValue: String(slider.pressed ? slider.formattedValue : attribute.value)
                     text: displayValue
                     selectByMouse: true
                     validator: DoubleValidator {
-                        locale: 'C'  // use '.' decimal separator disregarding the system locale
+                        locale: 'C'  // Use '.' decimal separator disregarding the system locale
                     }
                     onEditingFinished: setTextFieldAttribute(text)
                     onAccepted: setTextFieldAttribute(text)
                     Component.onDestruction: {
-                        if(activeFocus)
+                        if (activeFocus)
                             setTextFieldAttribute(text)
                     }
                 }
@@ -531,9 +806,9 @@ RowLayout {
                     color: Qt.hsla(slider.pressed ? slider.formattedValue : attribute.value, 1, 0.5, 1)
                 }
                 Slider {
+                    id: slider
                     Layout.fillWidth: true
 
-                    id: slider
                     readonly property int stepDecimalCount: 2
                     readonly property real formattedValue: value.toFixed(stepDecimalCount)
                     enabled: root.editable
@@ -543,7 +818,7 @@ RowLayout {
                     stepSize: 0.01
                     snapMode: Slider.SnapAlways
                     onPressedChanged: {
-                        if(!pressed)
+                        if (!pressed)
                             _reconstruction.setAttribute(attribute, formattedValue)
                     }
 
@@ -551,16 +826,7 @@ RowLayout {
                         width: control.availableWidth
                         height: control.availableHeight
                         blending: false
-                        fragmentShader: "
-                            varying mediump vec2 qt_TexCoord0;
-                            vec3 hsv2rgb(vec3 c) {
-                                vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                                vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-                                return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-                            }
-                            void main() {
-                                gl_FragColor = vec4(hsv2rgb(vec3(qt_TexCoord0.x, 1.0, 1.0)), 1.0);
-                            }"
+                        fragmentShader: "qrc:/shaders/AttributeItemDelegate.frag.qsb"
                     }
                 }
             }

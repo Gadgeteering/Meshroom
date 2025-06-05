@@ -4,7 +4,8 @@ from enum import Enum
 
 import meshroom
 from meshroom.common import BaseObject, DictModel, Property, Signal, Slot
-from meshroom.core.node import Status
+from meshroom.core.node import Status, Node
+from meshroom.core.graph import Graph
 import meshroom.core.graph
 
 
@@ -50,6 +51,7 @@ class TaskThread(Thread):
             except TypeError:
                 continue
 
+            node.preprocess()
             for cId, chunk in enumerate(node.chunks):
                 if chunk.isFinishedOrRunning() or not self.isRunning():
                     continue
@@ -68,7 +70,7 @@ class TaskThread(Thread):
                         stopAndRestart = True
                         break
                     else:
-                        logging.error("Error on node computation: {}".format(e))
+                        logging.error(f"Error on node computation: {e}.")
                         nodesToRemove, _ = self._manager._graph.dfsOnDiscover(startNodes=[node], reverse=True)
                         # remove following nodes from the task queue
                         for n in nodesToRemove[1:]:  # exclude current node
@@ -78,6 +80,7 @@ class TaskThread(Thread):
                                 # Node already removed (for instance a global clear of _nodesToProcess)
                                 pass
                             n.clearSubmittedChunks()
+            node.postprocess()
 
             if stopAndRestart:
                 break
@@ -94,8 +97,8 @@ class TaskManager(BaseObject):
     """
     Manage graph - local and external - computation tasks.
     """
-    def __init__(self, parent=None):
-        super(TaskManager, self).__init__(parent)
+    def __init__(self, parent: BaseObject = None):
+        super().__init__(parent)
         self._graph = None
         self._nodes = DictModel(keyAttrName='_name', parent=self)
         self._nodesToProcess = []
@@ -161,7 +164,7 @@ class TaskManager(BaseObject):
         self._thread = TaskThread(self)
         self._thread.start()
 
-    def compute(self, graph=None, toNodes=None, forceCompute=False, forceStatus=False):
+    def compute(self, graph: Graph = None, toNodes: list[Node] = None, forceCompute: bool = False, forceStatus: bool = False):
         """
         Start graph computation, from root nodes to leaves - or nodes in 'toNodes' if specified.
         Computation tasks (NodeChunk) happen in a separate thread (see TaskThread).
@@ -199,18 +202,18 @@ class TaskManager(BaseObject):
             self.checkDuplicates(nodes, "COMPUTATION")  # name of the context is important for QML
 
             nodes = [node for node in nodes if not self.contains(node)]  # be sure to avoid non-real conflicts
+            nodes = list(set(nodes))
+            nodes = sorted(nodes, key=lambda x: x.depth)
+
             chunksInConflict = self.getAlreadySubmittedChunks(nodes)
 
             if chunksInConflict:
-                chunksStatus = set([chunk.status.status.name for chunk in chunksInConflict])
+                chunksStatus = {chunk.status.status.name for chunk in chunksInConflict}
                 chunksName = [node.name for node in chunksInConflict]
                 # Warning: Syntax and terms are parsed on QML side to recognize the error
                 # Syntax : [Context] ErrorType: ErrorMessage
-                msg = '[COMPUTATION] Already Submitted:\n' \
-                      'WARNING - Some nodes are already submitted with status: {}\nNodes: {}'.format(
-                      ', '.join(chunksStatus),
-                      ', '.join(chunksName)
-                      )
+                msg = '[COMPUTATION] Already Submitted:\nWARNING - Some nodes are already submitted with status: ' \
+                      '{}\nNodes: {}'.format(', '.join(chunksStatus), ', '.join(chunksName))
 
                 if forceStatus:
                     logging.warning(msg)
@@ -320,34 +323,38 @@ class TaskManager(BaseObject):
                     raise RuntimeError("[{}] Duplicates Issue:\n"
                                        "Cannot compute because there are some duplicate nodes to process:\n\n"
                                        "First match: '{}' and '{}'\n\n"
-                                       "There can be other duplicate nodes in the list. Please, check the graph and try again.".format(
-                                       context, node.nameToLabel(node.name), node.nameToLabel(duplicate.name)))
+                                       "There can be other duplicate nodes in the list. "
+                                       "Please, check the graph and try again.".
+                                       format(context, node.nameToLabel(node.name), node.nameToLabel(duplicate.name)))
 
     def checkNodesDependencies(self, graph, toNodes, context):
         """
         Check dependencies of nodes to process.
-        Update toNodes with computable/submittable nodes only.
+        Update toNodes with computable/submitable nodes only.
 
         Returns:
             bool: True if all the nodes can be processed. False otherwise.
         """
         ready = []
         computed = []
+        inputNodes = []
         for node in toNodes:
-            if context == "COMPUTATION":
-                if graph.canCompute(node) and graph.canSubmitOrCompute(node) % 2 == 1:
+            if not node.isComputableType:
+                inputNodes.append(node)
+            elif context == "COMPUTATION":
+                if graph.canComputeTopologically(node) and graph.canSubmitOrCompute(node) % 2 == 1:
                     ready.append(node)
                 elif node.isComputed:
                     computed.append(node)
             elif context == "SUBMITTING":
-                if graph.canCompute(node) and graph.canSubmitOrCompute(node) > 1:
+                if graph.canComputeTopologically(node) and graph.canSubmitOrCompute(node) > 1:
                     ready.append(node)
                 elif node.isComputed:
                     computed.append(node)
             else:
                 raise ValueError("Argument 'context' must be: 'COMPUTATION' or 'SUBMITTING'")
 
-        if len(ready) + len(computed) != len(toNodes):
+        if len(ready) + len(computed) + len(inputNodes) != len(toNodes):
             toNodes.clear()
             toNodes.extend(ready)
             return False
@@ -358,7 +365,8 @@ class TaskManager(BaseObject):
         # Warning: Syntax and terms are parsed on QML side to recognize the error
         # Syntax : [Context] ErrorType: ErrorMessage
         raise RuntimeWarning("[{}] Unresolved dependencies:\n"
-                             "Some nodes cannot be computed in LOCAL/submitted in EXTERN because of unresolved dependencies.\n\n"
+                             "Some nodes cannot be computed in LOCAL/submitted in EXTERN because of "
+                             "unresolved dependencies.\n\n"
                              "Nodes which are ready will be processed.".format(context))
 
     def raiseImpossibleProcess(self, context):
@@ -418,8 +426,8 @@ class TaskManager(BaseObject):
         flowEdges = graph.flowEdges(startNodes=toNodes)
         edgesToProcess = set(edgesToProcess).intersection(flowEdges)
 
-        logging.info("Nodes to process: {}".format(nodesToProcess))
-        logging.info("Edges to process: {}".format(edgesToProcess))
+        logging.info(f"Nodes to process: {nodesToProcess}")
+        logging.info(f"Edges to process: {edgesToProcess}")
 
         try:
             res = sub.submit(nodesToProcess, edgesToProcess, graph.filepath, submitLabel=submitLabel)
@@ -434,7 +442,7 @@ class TaskManager(BaseObject):
             if not allReady:
                 self.raiseDependenciesMessage("SUBMITTING")
         except Exception as e:
-            logging.error("Error on submit : {}".format(e))
+            logging.error(f"Error on submit : {e}")
 
     def submitFromFile(self, graphFile, submitter, toNode=None, submitLabel="{projectName}"):
         """

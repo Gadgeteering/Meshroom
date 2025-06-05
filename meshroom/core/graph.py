@@ -1,9 +1,9 @@
-from __future__ import print_function
-
 import json
 import logging
 import os
 import re
+from typing import Any, Optional
+from collections.abc import Iterable
 import weakref
 from collections import defaultdict, OrderedDict
 from contextlib import contextmanager
@@ -14,13 +14,17 @@ import meshroom
 import meshroom.core
 from meshroom.common import BaseObject, DictModel, Slot, Signal, Property
 from meshroom.core import Version
-from meshroom.core.attribute import Attribute, ListAttribute
-from meshroom.core.exception import StopGraphVisit, StopBranchVisit
-from meshroom.core.node import nodeFactory, Status, Node, CompatibilityNode
+from meshroom.core.attribute import Attribute, ListAttribute, GroupAttribute
+from meshroom.core.exception import GraphCompatibilityError, StopGraphVisit, StopBranchVisit
+from meshroom.core.graphIO import GraphIO, GraphSerializer, TemplateGraphSerializer, PartialGraphSerializer
+from meshroom.core.node import BaseNode, Status, Node, CompatibilityNode
+from meshroom.core.nodeFactory import nodeFactory
+from meshroom.core.mtyping import PathLike
 
 # Replace default encoder to support Enums
 
 DefaultJSONEncoder = json.JSONEncoder  # store the original one
+
 
 class MyJSONEncoder(DefaultJSONEncoder):  # declare a new one with Enum support
     def default(self, obj):
@@ -58,10 +62,10 @@ def GraphModification(graph):
 class Edge(BaseObject):
 
     def __init__(self, src, dst, parent=None):
-        super(Edge, self).__init__(parent)
+        super().__init__(parent)
         self._src = weakref.ref(src)
         self._dst = weakref.ref(dst)
-        self._repr = "<Edge> {} -> {}".format(self._src(), self._dst())
+        self._repr = f"<Edge> {self._src()} -> {self._dst()}"
 
     @property
     def src(self):
@@ -80,13 +84,13 @@ GRAY = 1
 BLACK = 2
 
 
-class Visitor(object):
+class Visitor:
     """
     Base class for Graph Visitors that does nothing.
     Sub-classes can override any method to implement specific algorithms.
     """
     def __init__(self, reverse, dependenciesOnly):
-        super(Visitor, self).__init__()
+        super().__init__()
         self.reverse = reverse
         self.dependenciesOnly = dependenciesOnly
 
@@ -147,6 +151,34 @@ def changeTopology(func):
     return decorator
 
 
+def blockNodeCallbacks(func):
+    """
+    Graph methods loading serialized graph content must be decorated with 'blockNodeCallbacks',
+    to avoid attribute changed callbacks defined on node descriptions to be triggered during
+    this process.
+    """
+    def inner(self, *args, **kwargs):
+        self._loading = True
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            self._loading = False
+    return inner
+
+
+def generateTempProjectFilepath(tmpFolder=None):
+    """
+    Generate a temporary project filepath.
+    This method is used to generate a temporary project file for the current graph.
+    """
+    from datetime import datetime
+    if tmpFolder is None:
+        from meshroom.env import EnvVar
+        tmpFolder = EnvVar.get(EnvVar.MESHROOM_TEMP_PATH)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    return os.path.join(tmpFolder, f"meshroom_{timestamp}.mg")
+
+
 class Graph(BaseObject):
     """
     _________________      _________________      _________________
@@ -162,318 +194,270 @@ class Graph(BaseObject):
         edges = {B.input: A.output, C.input: B.output,}
 
     """
-    _cacheDir = ""
 
-    class IO(object):
-        """ Centralize Graph file keys and IO version. """
-        __version__ = "1.1"
-
-        class Keys(object):
-            """ File Keys. """
-            # Doesn't inherit enum to simplify usage (Graph.IO.Keys.XX, without .value)
-            Header = "header"
-            NodesVersions = "nodesVersions"
-            ReleaseVersion = "releaseVersion"
-            FileVersion = "fileVersion"
-            Graph = "graph"
-
-        class Features(Enum):
-            """ File Features. """
-            Graph = "graph"
-            Header = "header"
-            NodesVersions = "nodesVersions"
-            PrecomputedOutputs = "precomputedOutputs"
-            NodesPositions = "nodesPositions"
-
-        @staticmethod
-        def getFeaturesForVersion(fileVersion):
-            """ Return the list of supported features based on a file version.
-
-            Args:
-                fileVersion (str, Version): the file version
-
-            Returns:
-                tuple of Graph.IO.Features: the list of supported features
-            """
-            if isinstance(fileVersion, str):
-                fileVersion = Version(fileVersion)
-
-            features = [Graph.IO.Features.Graph]
-            if fileVersion >= Version("1.0"):
-                features += [Graph.IO.Features.Header,
-                             Graph.IO.Features.NodesVersions,
-                             Graph.IO.Features.PrecomputedOutputs,
-                             ]
-            if fileVersion >= Version("1.1"):
-                features += [Graph.IO.Features.NodesPositions]
-            return tuple(features)
-
-    def __init__(self, name, parent=None):
-        super(Graph, self).__init__(parent)
-        self.name = name
-        self._updateEnabled = True
-        self._updateRequested = False
-        self.dirtyTopology = False
+    def __init__(self, name: str = "", parent: BaseObject = None):
+        super().__init__(parent)
+        self.name: str = name
+        self._loading: bool = False
+        self._saving: bool = False
+        self._updateEnabled: bool = True
+        self._updateRequested: bool = False
+        self.dirtyTopology: bool = False
         self._nodesMinMaxDepths = {}
         self._computationBlocked = {}
-        self._canComputeLeaves = True
+        self._canComputeLeaves: bool = True
         self._nodes = DictModel(keyAttrName='name', parent=self)
-        self._edges = DictModel(keyAttrName='dst', parent=self)  # use dst attribute as unique key since it can only have one input connection
-        self._importedNodes = DictModel(keyAttrName='name', parent=self)
+        # Edges: use dst attribute as unique key since it can only have one input connection
+        self._edges = DictModel(keyAttrName='dst', parent=self)
         self._compatibilityNodes = DictModel(keyAttrName='name', parent=self)
-        self.cacheDir = meshroom.core.defaultCacheFolder
-        self._filepath = ''
+        self._cacheDir: str = ''
+        self._filepath: str = ''
+        self._fileDateVersion = 0
         self.header = {}
 
     def clear(self):
+        self._clearGraphContent()
         self.header.clear()
-        self._compatibilityNodes.clear()
+        self._unsetFilepath()
+
+    def _clearGraphContent(self):
         self._edges.clear()
         # Tell QML nodes are going to be deleted
         for node in self._nodes:
             node.alive = False
-        self._importedNodes.clear()
         self._nodes.clear()
+        self._compatibilityNodes.clear()
 
     @property
     def fileFeatures(self):
         """ Get loaded file supported features based on its version. """
-        return Graph.IO.getFeaturesForVersion(self.header.get(Graph.IO.Keys.FileVersion, "0.0"))
+        return GraphIO.getFeaturesForVersion(self.header.get(GraphIO.Keys.FileVersion, "0.0"))
+
+    @property
+    def isLoading(self):
+        """ Return True if the graph is currently being loaded. """
+        return self._loading
+    
+    @property
+    def isSaving(self):
+        """ Return True if the graph is currently being saved. """
+        return self._saving
 
     @Slot(str)
-    def load(self, filepath, setupProjectFile=True, importProject=False, publishOutputs=False):
+    def load(self, filepath: PathLike):
         """
-        Load a Meshroom graph ".mg" file.
+        Load a Meshroom Graph ".mg" file in place.
 
         Args:
-            filepath: project filepath to load
-            setupProjectFile: Store the reference to the project file and setup the cache directory.
-                              If false, it only loads the graph of the project file as a template.
-            importProject: True if the project that is loaded will be imported in the current graph, instead
-                           of opened.
-            publishOutputs: True if "Publish" nodes from templates should not be ignored.
+            filepath: The path to the Meshroom Graph file to load.
         """
-        if not importProject:
-            self.clear()
-        with open(filepath) as jsonFile:
-            fileData = json.load(jsonFile)
+        self._setFilepath(filepath)
+        self._deserialize(Graph._loadGraphData(filepath))
+        self._fileDateVersion = os.path.getmtime(filepath)
 
-        # older versions of Meshroom files only contained the serialized nodes
-        graphData = fileData.get(Graph.IO.Keys.Graph, fileData)
+    def initFromTemplate(self, filepath: PathLike, publishOutputs: bool = False):
+        """
+        Deserialize a template Meshroom Graph ".mg" file in place.
 
-        if importProject:
-            self._importedNodes.clear()
-            graphData = self.updateImportedProject(graphData)
+        When initializing from a template, the internal filepath of the graph instance is not set.
+        Saving the file on disk will require to specify a filepath.
 
-        if not isinstance(graphData, dict):
-            raise RuntimeError('loadGraph error: Graph is not a dict. File: {}'.format(filepath))
+        Args:
+            filepath: The path to the Meshroom Graph file to load.
+            publishOutputs: (optional) Whether to keep 'Publish' nodes.
+        """
+        self._deserialize(Graph._loadGraphData(filepath))
 
-        self.header = fileData.get(Graph.IO.Keys.Header, {})
-        nodesVersions = self.header.get(Graph.IO.Keys.NodesVersions, {})
+        # Creating nodes from a template is conceptually similar to explicit node creation,
+        # therefore the nodes descriptors' "onNodeCreated" callback is triggered for each
+        # node instance created by this process.
+        self._triggerNodeCreatedCallback(self.nodes)
 
-        # check whether the file was saved as a template in minimal mode
-        isTemplate = self.header.get("template", False)
+        if not publishOutputs:
+            with GraphModification(self):
+                for node in [node for node in self.nodes if node.nodeType == "Publish"]:
+                    self.removeNode(node.name)
+
+    @staticmethod
+    def _loadGraphData(filepath: PathLike) -> dict:
+        """Deserialize the content of the Meshroom Graph file at `filepath` to a dictionnary."""
+        with open(filepath) as file:
+            graphData = json.load(file)
+        return graphData
+
+    @blockNodeCallbacks
+    def _deserialize(self, graphData: dict):
+        """Deserialize `graphData` in the current Graph instance.
+
+        Args:
+            graphData: The serialized Graph.
+        """
+        self._clearGraphContent()
+        self.header.clear()
+
+        self.header = graphData.get(GraphIO.Keys.Header, {})
+        fileVersion = Version(self.header.get(GraphIO.Keys.FileVersion, "0.0"))
+        graphContent = self._normalizeGraphContent(graphData, fileVersion)
+        isTemplate = self.header.get(GraphIO.Keys.Template, False)
 
         with GraphModification(self):
             # iterate over nodes sorted by suffix index in their names
-            for nodeName, nodeData in sorted(graphData.items(), key=lambda x: self.getNodeIndexFromName(x[0])):
-                if not isinstance(nodeData, dict):
-                    raise RuntimeError('loadGraph error: Node is not a dict. File: {}'.format(filepath))
-
-                # retrieve version from
-                #   1. nodeData: node saved from a CompatibilityNode
-                #   2. nodesVersion in file header: node saved from a Node
-                #   3. fallback to no version "0.0": retro-compatibility
-                if "version" not in nodeData:
-                    nodeData["version"] = nodesVersions.get(nodeData["nodeType"], "0.0")
-
-                # if the node is a "Publish" node and comes from a template file, it should be ignored
-                # unless publishOutputs is True
-                if isTemplate and not publishOutputs and nodeData["nodeType"] == "Publish":
-                    continue
-
-                n = nodeFactory(nodeData, nodeName, template=isTemplate)
-
-                # Add node to the graph with raw attributes values
-                self._addNode(n, nodeName)
-
-                if importProject:
-                    self._importedNodes.add(n)
+            for nodeName, nodeData in sorted(
+                graphContent.items(), key=lambda x: self.getNodeIndexFromName(x[0])
+            ):
+                self._deserializeNode(nodeData, nodeName, self)
 
             # Create graph edges by resolving attributes expressions
             self._applyExpr()
+            
+        # Templates are specific: they contain only the minimal amount of 
+        # serialized data to describe the graph structure.
+        # They are not meant to be computed: therefore, we can early return here,
+        # as uid conflict evaluation is only meaningful for nodes with computed data.
+        if isTemplate:
+            return
 
-            if setupProjectFile:
-                # Update filepath related members
-                # Note: needs to be done at the end as it will trigger an updateInternals.
-                self._setFilepath(filepath)
+        # By this point, the graph has been fully loaded and an updateInternals has been triggered, so all the
+        # nodes' links have been resolved and their UID computations are all complete.
+        # It is now possible to check whether the UIDs stored in the graph file for each node correspond to the ones
+        # that were computed.
+        self._evaluateUidConflicts(graphContent)
 
-            # By this point, the graph has been fully loaded and an updateInternals has been triggered, so all the nodes'
-            # links have been resolved and their UID computations are all complete.
-            # It is now possible to check whether the UIDs stored in the graph file for each node correspond to the ones
-            # that were computed.
-            if not isTemplate:  # UIDs are not stored in templates
-                self._evaluateUidConflicts(graphData)
-                self._applyExpr()
+    def _normalizeGraphContent(self, graphData: dict, fileVersion: Version) -> dict:
+        graphContent = graphData.get(GraphIO.Keys.Graph, graphData)
 
-        return True
+        if fileVersion < Version("2.0"):
+            # For internal folders, all "{uid0}" keys should be replaced with "{uid}"
+            updatedFileData = json.dumps(graphContent).replace("{uid0}", "{uid}")
 
-    def _evaluateUidConflicts(self, data):
+            # For fileVersion < 2.0, the nodes' UID is stored as:
+            # "uids": {"0": "hashvalue"}
+            # These should be identified and replaced with:
+            # "uid": "hashvalue"
+            uidPattern = re.compile(r'"uids": \{"0":.*?\}')
+            uidOccurrences = uidPattern.findall(updatedFileData)
+            for occ in uidOccurrences:
+                uid = occ.split("\"")[-2]  # UID is second to last element
+                newUidStr = fr'"uid": "{uid}"'
+                updatedFileData = updatedFileData.replace(occ, newUidStr)
+            graphContent = json.loads(updatedFileData)
+
+        return graphContent
+
+    def _deserializeNode(self, nodeData: dict, nodeName: str, fromGraph: "Graph"):
+        # Retrieve version info from:
+        #   1. nodeData: node saved from a CompatibilityNode
+        #   2. nodesVersion in file header: node saved from a Node
+        # If unvailable, the "version" field will not be set in `nodeData`.
+        if "version" not in nodeData:
+            if version := fromGraph._getNodeTypeVersionFromHeader(nodeData["nodeType"]):
+                nodeData["version"] = version
+        inTemplate = fromGraph.header.get(GraphIO.Keys.Template, False)
+        node = nodeFactory(nodeData, nodeName, inTemplate=inTemplate)
+        self._addNode(node, nodeName)
+        return node
+
+    def _getNodeTypeVersionFromHeader(self, nodeType: str, default: Optional[str] = None) -> Optional[str]:
+        nodeVersions = self.header.get(GraphIO.Keys.NodesVersions, {})
+        return nodeVersions.get(nodeType, default)
+
+    def _evaluateUidConflicts(self, graphContent: dict):
         """
-        Compare the UIDs of all the nodes in the graph with the UID that is expected in the graph file. If there
+        Compare the computed UIDs of all the nodes in the graph with the UIDs serialized in `graphContent`. If there
         are mismatches, the nodes with the unexpected UID are replaced with "UidConflict" compatibility nodes.
-
+  
         Args:
-            data (dict): the dictionary containing all the nodes to import and their data
+            graphContent: The serialized Graph content.
         """
-        for nodeName, nodeData in sorted(data.items(), key=lambda x: self.getNodeIndexFromName(x[0])):
-            node = self.node(nodeName)
-            # If the node is a CompatibilityNode, its UID is not available and there is no need to check it
+
+        def _serializedNodeUidMatchesComputedUid(nodeData: dict, node: BaseNode) -> bool:
+            """Returns whether the serialized UID matches the one computed in the `node` instance."""
             if isinstance(node, CompatibilityNode):
+                return True
+            serializedUid = nodeData.get("uid", None)
+            computedUid = node._uid
+            return serializedUid is None or computedUid is None or serializedUid == computedUid
+
+        uidConflictingNodes = [
+            node
+            for node in self.nodes
+            if not _serializedNodeUidMatchesComputedUid(graphContent[node.name], node)
+        ]
+
+        if not uidConflictingNodes:
+            return
+
+        logging.warning("UID Compatibility issues found: recreating conflicting nodes as CompatibilityNodes.")
+
+        # A uid conflict is contagious: if a node has a uid conflict, all of its downstream nodes may be 
+        # impacted as well, as the uid flows through connections.
+        # Therefore, we deal with conflicting uid nodes by depth: replacing a node with a CompatibilityNode restores
+        # the serialized uid, which might solve "false-positives" downstream conflicts as well.
+        nodesSortedByDepth = sorted(uidConflictingNodes, key=lambda node: node.minDepth)
+        for node in nodesSortedByDepth:
+            nodeData = graphContent[node.name]
+            # Evaluate if the node uid is still conflicting at this point, or if it has been resolved by an
+            # upstream node replacement.
+            if _serializedNodeUidMatchesComputedUid(nodeData, node):
                 continue
+            expectedUid = node._uid
+            compatibilityNode = nodeFactory(graphContent[node.name], node.name, expectedUid=expectedUid)
+            # This operation will trigger a graph update that will recompute the uids of all nodes,
+            # allowing the iterative resolution of uid conflicts.
+            self.replaceNode(node.name, compatibilityNode)
 
-            savedUid = nodeData.get("uids", "").get("0", "")  # Node's UID from the graph file
-            graphUid = node._uids.get(0)  # Node's UID from the graph itself
-            if savedUid != graphUid and graphUid is not None:
-                # Different UIDs, remove the existing node from the graph and replace it with a CompatibilityNode
-                logging.debug("UID conflict detected for {}".format(nodeName))
-                self.removeNode(nodeName)
-                n = nodeFactory(nodeData, nodeName, template=False, uidConflict=True)
-                self._addNode(n, nodeName)
 
-    def updateImportedProject(self, data):
-        """
-        Update the names and links of the project to import so that it can fit
-        correctly in the existing graph.
-
-        Parse all the nodes from the project that is going to be imported.
-        If their name already exists in the graph, replace them with new names,
-        then parse all the nodes' inputs/outputs to replace the old names with
-        the new ones in the links.
+    def importGraphContentFromFile(self, filepath: PathLike) -> list[Node]:
+        """Import the content (nodes and edges) of another Graph file into this Graph instance.
 
         Args:
-            data (dict): the dictionary containing all the nodes to import and their data
+            filepath: The path to the Graph file to import.
 
         Returns:
-            updatedData (dict): the dictionary containing all the nodes to import with their updated names and data
+            The list of newly created Nodes.
         """
-        nameCorrespondences = {}  # maps the old node name to its updated one
-        updatedData = {}  # input data with updated node names and links
+        graph = loadGraph(filepath)
+        return self.importGraphContent(graph)
 
-        def createUniqueNodeName(nodeNames, inputName):
-            """
-            Create a unique name that does not already exist in the current graph or in the list
-            of nodes that will be imported.
-            """
-            i = 1
-            while i:
-                newName = "{name}_{index}".format(name=inputName, index=i)
-                if newName not in nodeNames and newName not in updatedData.keys():
-                    return newName
-                i += 1
-
-        # First pass to get all the names that already exist in the graph, update them, and keep track of the changes
-        for nodeName, nodeData in sorted(data.items(), key=lambda x: self.getNodeIndexFromName(x[0])):
-            if not isinstance(nodeData, dict):
-                raise RuntimeError('updateImportedProject error: Node is not a dict.')
-
-            if nodeName in self._nodes.keys() or nodeName in updatedData.keys():
-                newName = createUniqueNodeName(self._nodes.keys(), nodeData["nodeType"])
-                updatedData[newName] = nodeData
-                nameCorrespondences[nodeName] = newName
-
-            else:
-                updatedData[nodeName] = nodeData
-
-        newNames = [nodeName for nodeName in updatedData]  # names of all the nodes that will be added
-
-        # Second pass to update all the links in the input/output attributes for every node with the new names
-        for nodeName, nodeData in updatedData.items():
-            nodeType = nodeData.get("nodeType", None)
-            nodeDesc = meshroom.core.nodesDesc[nodeType]
-
-            inputs = nodeData.get("inputs", {})
-            outputs = nodeData.get("outputs", {})
-
-            if inputs:
-                inputs = self.updateLinks(inputs, nameCorrespondences)
-                inputs = self.resetExternalLinks(inputs, nodeDesc.inputs, newNames)
-                updatedData[nodeName]["inputs"] = inputs
-            if outputs:
-                outputs = self.updateLinks(outputs, nameCorrespondences)
-                outputs = self.resetExternalLinks(outputs, nodeDesc.outputs, newNames)
-                updatedData[nodeName]["outputs"] = outputs
-
-        return updatedData
-
-    @staticmethod
-    def updateLinks(attributes, nameCorrespondences):
+    @blockNodeCallbacks
+    def importGraphContent(self, graph: "Graph") -> list[Node]:
         """
-        Update all the links that refer to nodes that are going to be imported and whose
-        names have to be updated.
+        Import the content (node and edges) of another `graph` into this Graph instance.
+
+        Nodes are imported with their original names if possible, otherwise a new unique name is generated
+        from their node type.
 
         Args:
-            attributes (dict): attributes whose links need to be updated
-            nameCorrespondences (dict): node names to replace in the links with the name to replace them with
+            graph: The graph to import.
 
         Returns:
-            attributes (dict): the attributes with all the updated links
+            The list of newly created Nodes.
         """
-        for key, val in attributes.items():
-            for corr in nameCorrespondences.keys():
-                if isinstance(val, str) and corr in val:
-                    attributes[key] = val.replace(corr, nameCorrespondences[corr])
-                elif isinstance(val, list):
-                    for v in val:
-                        if isinstance(v, str):
-                            if corr in v:
-                                val[val.index(v)] = v.replace(corr, nameCorrespondences[corr])
-                        else:  # the list does not contain strings, so there cannot be links to update
-                            break
-                    attributes[key] = val
 
-        return attributes
+        def _renameClashingNodes():
+            if not self.nodes:
+                return
+            unavailableNames = set(self.nodes.keys())
+            for node in graph.nodes:
+                if node._name in unavailableNames:
+                    node._name = self._createUniqueNodeName(node.nodeType, unavailableNames)
+                unavailableNames.add(node._name)
 
-    @staticmethod
-    def resetExternalLinks(attributes, nodeDesc, newNames):
-        """
-        Reset all links to nodes that are not part of the nodes which are going to be imported:
-        if there are links to nodes that are not in the list, then it means that the references
-        are made to external nodes, and we want to get rid of those.
+        def _importNodesAndEdges() -> list[Node]:
+            importedNodes = []
+            # If we import the content of the graph within itself,
+            # iterate over a copy of the nodes as the graph is modified during the iteration.
+            nodes = graph.nodes if graph is not self else list(graph.nodes)
+            with GraphModification(self):
+                for srcNode in nodes:
+                    node = self._deserializeNode(srcNode.toDict(), srcNode.name, graph)
+                    importedNodes.append(node)
+                self._applyExpr()
+            return importedNodes
 
-        Args:
-            attributes (dict): attributes whose links might need to be reset
-            nodeDesc (list): list with all the attributes' description (including their default value)
-            newNames (list): names of the nodes that are going to be imported; no node name should be referenced
-                             in the links except those contained in this list
-
-        Returns:
-            attributes (dict): the attributes with all the links referencing nodes outside those which will be imported
-                               reset to their default values
-        """
-        for key, val in attributes.items():
-            defaultValue = None
-            for desc in nodeDesc:
-                if desc.name == key:
-                    defaultValue = desc.value
-                    break
-
-            if isinstance(val, str):
-                if Attribute.isLinkExpression(val) and not any(name in val for name in newNames):
-                    if defaultValue is not None:  # prevents from not entering condition if defaultValue = ''
-                        attributes[key] = defaultValue
-
-            elif isinstance(val, list):
-                removedCnt = len(val)  # counter to know whether all the list entries will be deemed invalid
-                tmpVal = list(val)  # deep copy to ensure we iterate over the entire list (even if elements are removed)
-                for v in tmpVal:
-                    if isinstance(v, str) and Attribute.isLinkExpression(v) and not any(name in v for name in newNames):
-                        val.remove(v)
-                        removedCnt -= 1
-                if removedCnt == 0 and defaultValue is not None:  # if all links were wrong, reset the attribute
-                    attributes[key] = defaultValue
-
-        return attributes
+        _renameClashingNodes()
+        importedNodes = _importNodesAndEdges()
+        return importedNodes
 
     @property
     def updateEnabled(self):
@@ -535,16 +519,20 @@ class Graph(BaseObject):
             skippedEdges = {}
             if not withEdges:
                 for n, attr in node.attributes.items():
+                    if attr.isOutput:
+                        # edges are declared in input with an expression linking
+                        # to another param (which could be an output)
+                        continue
                     # find top-level links
                     if Attribute.isLinkExpression(attr.value):
                         skippedEdges[attr] = attr.value
-                        attr.resetValue()
+                        attr.resetToDefaultValue()
                     # find links in ListAttribute children
-                    elif isinstance(attr, ListAttribute):
+                    elif isinstance(attr, (ListAttribute, GroupAttribute)):
                         for child in attr.value:
                             if Attribute.isLinkExpression(child.value):
                                 skippedEdges[child] = child.value
-                                child.resetValue()
+                                child.resetToDefaultValue()
         return node, skippedEdges
 
     def duplicateNodes(self, srcNodes):
@@ -571,6 +559,7 @@ class Graph(BaseObject):
 
             # re-create edges taking into account what has been duplicated
             for attr, linkExpression in duplicateEdges.items():
+                # logging.warning("attr={} linkExpression={}".format(attr.fullName, linkExpression))
                 link = linkExpression[1:-1]  # remove starting '{' and trailing '}'
                 # get source node and attribute name
                 edgeSrcNodeName, edgeSrcAttrName = link.split(".", 1)
@@ -582,40 +571,6 @@ class Graph(BaseObject):
                 self.addEdge(edgeSrcNode.attribute(edgeSrcAttrName), attr)
 
         return duplicates
-
-    def pasteNodes(self, data, position):
-        """
-        Paste node(s) in the graph with their connections. The connections can only be between
-        the pasted nodes and not with the rest of the graph.
-
-        Args:
-            data (dict): the dictionary containing the information about the nodes to paste, with their names and
-                         links already updated to be added to the graph
-            position (list): the list of positions for each node to paste
-
-        Returns:
-            list: the list of Node objects that were pasted and added to the graph
-        """
-        nodes = []
-        with GraphModification(self):
-            positionCnt = 0  # always valid because we know the data is sorted the same way as the position list
-            for key in sorted(data):
-                nodeType = data[key].get("nodeType", None)
-                if not nodeType:  # this case should never occur, as the data should have been prefiltered first
-                    pass
-
-                attributes = {}
-                attributes.update(data[key].get("inputs", {}))
-                attributes.update(data[key].get("outputs", {}))
-
-                node = Node(nodeType, position=position[positionCnt], **attributes)
-                self._addNode(node, key)
-
-                nodes.append(node)
-                positionCnt += 1
-
-            self._applyExpr()
-        return nodes
 
     def outEdges(self, attribute):
         """ Return the list of edges starting from the given attribute """
@@ -635,39 +590,66 @@ class Graph(BaseObject):
     @changeTopology
     def removeNode(self, nodeName):
         """
-        Remove the node identified by 'nodeName' from the graph
-        and return in and out edges removed by this operation in two dicts {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+        Remove the node identified by 'nodeName' from the graph.
+        Returns:
+            - a dictionary containing the incoming edges removed by this operation:
+                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+            - a dictionary containing the outgoing edges removed by this operation:
+                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+            - a dictionary containing the values, indices and keys of attributes that were connected to a ListAttribute
+                prior to the removal of all edges:
+                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
         """
         node = self.node(nodeName)
         inEdges = {}
         outEdges = {}
+        outListAttributes = {}
 
         # Remove all edges arriving to and starting from this node
         with GraphModification(self):
+            # Two iterations over the outgoing edges are necessary:
+            # - the first one is used to collect all the information about the edges while they are all there
+            #   (overall context)
+            # - once we have collected all the information, the edges (and perhaps the entries in ListAttributes) can
+            #   actually be removed
+            for edge in self.nodeOutEdges(node):
+                outEdges[edge.dst.getFullNameToNode()] = edge.src.getFullNameToNode()
+
+                if isinstance(edge.dst.root, ListAttribute):
+                    index = edge.dst.root.index(edge.dst)
+                    outListAttributes[edge.dst.getFullNameToNode()] = (edge.dst.root.getFullNameToNode(),
+                                                                       index, edge.dst.value
+                                                                       if edge.dst.value else None)
+
             for edge in self.nodeOutEdges(node):
                 self.removeEdge(edge.dst)
-                outEdges[edge.dst.getFullNameToNode()] = edge.src.getFullNameToNode()
+
+                # Remove the corresponding attributes from the ListAttributes instead of just emptying their values
+                if isinstance(edge.dst.root, ListAttribute):
+                    index = edge.dst.root.index(edge.dst)
+                    edge.dst.root.remove(index)
+
             for edge in self.nodeInEdges(node):
                 self.removeEdge(edge.dst)
                 inEdges[edge.dst.getFullNameToNode()] = edge.src.getFullNameToNode()
 
             node.alive = False
             self._nodes.remove(node)
-            if node in self._importedNodes:
-                self._importedNodes.remove(node)
             self.update()
 
-        return inEdges, outEdges
+        return inEdges, outEdges, outListAttributes
 
-    def addNewNode(self, nodeType, name=None, position=None, **kwargs):
+    def addNewNode(
+        self, nodeType: str, name: Optional[str] = None, position: Optional[str] = None, **kwargs
+    ) -> Node:
         """
         Create and add a new node to the graph.
 
         Args:
-            nodeType (str): the node type name.
-            name (str): if specified, the desired name for this node. If not unique, will be prefixed (_N).
-            position (Position): (optional) the position of the node
-            **kwargs: keyword arguments to initialize node's attributes
+            nodeType: the node type name.
+            name: if specified, the desired name for this node. If not unique, will be prefixed (_N).
+            position: the position of the node.
+            **kwargs: keyword arguments to initialize the created node's attributes.
 
         Returns:
              The newly created node.
@@ -675,44 +657,100 @@ class Graph(BaseObject):
         if name and name in self._nodes.keys():
             name = self._createUniqueNodeName(name)
 
-        n = self.addNode(Node(nodeType, position=position, **kwargs), uniqueName=name)
-        n.updateInternals()
-        return n
+        node = self.addNode(Node(nodeType, position=position, **kwargs), uniqueName=name)
+        node.updateInternals()
+        self._triggerNodeCreatedCallback([node])
+        return node
 
-    def _createUniqueNodeName(self, inputName):
-        i = 1
-        while i:
-            newName = "{name}_{index}".format(name=inputName, index=i)
-            if newName not in self._nodes.objects:
+    def _triggerNodeCreatedCallback(self, nodes: Iterable[Node]):
+        """Trigger the `onNodeCreated` node descriptor callback for each node instance in `nodes`."""
+        with GraphModification(self):
+            for node in nodes:
+                if node.nodeDesc:
+                    node.nodeDesc.onNodeCreated(node)
+
+    def _createUniqueNodeName(self, inputName: str, existingNames: Optional[set[str]] = None):
+        """Create a unique node name based on the input name.
+
+        Args:
+            inputName: The desired node name.
+            existingNames: (optional) If specified, consider this set for uniqueness check, instead of the list of nodes.
+        """
+        existingNodeNames = existingNames or set(self._nodes.objects.keys())
+
+        idx = 1
+        while idx:
+            newName = f"{inputName}_{idx}"
+            if newName not in existingNodeNames:
                 return newName
-            i += 1
+            idx += 1
 
-    def node(self, nodeName):
+    def node(self, nodeName) -> Optional[Node]:
         return self._nodes.get(nodeName)
 
-    def upgradeNode(self, nodeName):
+    def upgradeNode(self, nodeName) -> Node:
         """
         Upgrade the CompatibilityNode identified as 'nodeName'
         Args:
             nodeName (str): the name of the CompatibilityNode to upgrade
 
         Returns:
-            the list of deleted input/output edges
+            - the upgraded (newly created) node
+            - a dictionary containing the incoming edges removed by this operation:
+                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+            - a dictionary containing the outgoing edges removed by this operation:
+                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+            - a dictionary containing the values, indices and keys of attributes that were connected to a ListAttribute
+                prior to the removal of all edges:
+                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
         """
         node = self.node(nodeName)
         if not isinstance(node, CompatibilityNode):
             raise ValueError("Upgrade is only available on CompatibilityNode instances.")
         upgradedNode = node.upgrade()
-        with GraphModification(self):
-            inEdges, outEdges = self.removeNode(nodeName)
-            self.addNode(upgradedNode, nodeName)
-            for dst, src in outEdges.items():
-                try:
-                    self.addEdge(self.attribute(src), self.attribute(dst))
-                except (KeyError, ValueError) as e:
-                    logging.warning("Failed to restore edge {} -> {}: {}".format(src, dst, str(e)))
+        self.replaceNode(nodeName, upgradedNode)
+        return upgradedNode
 
-        return upgradedNode, inEdges, outEdges
+    @changeTopology
+    def replaceNode(self, nodeName: str, newNode: BaseNode):
+        """Replace the node idenfitied by `nodeName` with `newNode`, while restoring compatible edges.
+
+        Args:
+            nodeName: The name of the Node to replace.
+            newNode: The Node instance to replace it with.
+        """
+        with GraphModification(self):
+            _, outEdges, outListAttributes = self.removeNode(nodeName)
+            self.addNode(newNode, nodeName)
+            self._restoreOutEdges(outEdges, outListAttributes)
+    
+    def _restoreOutEdges(self, outEdges: dict[str, str], outListAttributes):
+        """Restore output edges that were removed during a call to "removeNode".
+        
+        Args:
+            outEdges: a dictionary containing the outgoing edges removed by a call to "removeNode".
+                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+            outListAttributes: a dictionary containing the values, indices and keys of attributes that were connected
+                to a ListAttribute prior to the removal of all edges.
+                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
+        """
+        def _recreateTargetListAttributeChildren(listAttrName: str, index: int, value: Any):
+            listAttr = self.attribute(listAttrName)
+            if not isinstance(listAttr, ListAttribute):
+                return
+            if isinstance(value, list):
+                listAttr[index:index] = value
+            else:
+                listAttr.insert(index, value)
+
+        for dstName, srcName in outEdges.items():
+            # Re-create the entries in ListAttributes that were completely removed during the call to "removeNode"
+            if dstName in outListAttributes:
+                _recreateTargetListAttributeChildren(*outListAttributes[dstName])
+            try:
+                self.addEdge(self.attribute(srcName), self.attribute(dstName))
+            except (KeyError, ValueError) as e:
+                logging.warning(f"Failed to restore edge {srcName} -> {dstName}: {e}")
 
     def upgradeAllNodes(self):
         """ Upgrade all upgradable CompatibilityNode instances in the graph. """
@@ -756,7 +794,7 @@ class Graph(BaseObject):
         """
         try:
             return int(name.split('_')[-1])
-        except:
+        except Exception:
             return -1
 
     @staticmethod
@@ -793,19 +831,19 @@ class Graph(BaseObject):
         nodes = [n for n in self._nodes.values() if isinstance(n.nodeDesc, meshroom.core.desc.InitNode)]
         return nodes
 
-    def findNodeCandidates(self, nodeNameExpr):
+    def findNodeCandidates(self, nodeNameExpr: str) -> list[Node]:
         pattern = re.compile(nodeNameExpr)
         return [v for k, v in self._nodes.objects.items() if pattern.match(k)]
 
-    def findNode(self, nodeExpr):
+    def findNode(self, nodeExpr: str) -> Node:
         candidates = self.findNodeCandidates('^' + nodeExpr)
         if not candidates:
-            raise KeyError('No node candidate for "{}"'.format(nodeExpr))
+            raise KeyError(f'No node candidate for "{nodeExpr}"')
         if len(candidates) > 1:
             for c in candidates:
                 if c.name == nodeExpr:
                     return c
-            raise KeyError('Multiple node candidates for "{}": {}'.format(nodeExpr, str([c.name for c in candidates])))
+            raise KeyError(f'Multiple node candidates for "{nodeExpr}": {str([c.name for c in candidates])}')
         return candidates[0]
 
     def findNodes(self, nodesExpr):
@@ -817,11 +855,11 @@ class Graph(BaseObject):
         return self._edges.get(dstAttributeName)
 
     def getLeafNodes(self, dependenciesOnly):
-        nodesWithOutputLink = set([edge.src.node for edge in self.getEdges(dependenciesOnly)])
+        nodesWithOutputLink = {edge.src.node for edge in self.getEdges(dependenciesOnly)}
         return set(self._nodes) - nodesWithOutputLink
 
     def getRootNodes(self, dependenciesOnly):
-        nodesWithInputLink = set([edge.dst.node for edge in self.getEdges(dependenciesOnly)])
+        nodesWithInputLink = {edge.dst.node for edge in self.getEdges(dependenciesOnly)}
         return set(self._nodes) - nodesWithInputLink
 
     @changeTopology
@@ -831,7 +869,7 @@ class Graph(BaseObject):
         if srcAttr.node.graph != self or dstAttr.node.graph != self:
             raise RuntimeError('The attributes of the edge should be part of a common graph.')
         if dstAttr in self.edges.keys():
-            raise RuntimeError('Destination attribute "{}" is already connected.'.format(dstAttr.getFullNameToNode()))
+            raise RuntimeError(f'Destination attribute "{dstAttr.getFullNameToNode()}" is already connected.')
         edge = Edge(srcAttr, dstAttr)
         self.edges.add(edge)
         self.markNodesDirty(dstAttr.node)
@@ -848,7 +886,7 @@ class Graph(BaseObject):
     @changeTopology
     def removeEdge(self, dstAttr):
         if dstAttr not in self.edges.keys():
-            raise RuntimeError('Attribute "{}" is not connected'.format(dstAttr.getFullNameToNode()))
+            raise RuntimeError(f'Attribute "{dstAttr.getFullNameToNode()}" is not connected')
         edge = self.edges.pop(dstAttr)
         self.markNodesDirty(dstAttr.node)
         dstAttr.valueChanged.emit()
@@ -871,7 +909,7 @@ class Graph(BaseObject):
         return minDepth if minimal else maxDepth
 
     def getInputEdges(self, node, dependenciesOnly):
-        return set([edge for edge in self.getEdges(dependenciesOnly=dependenciesOnly) if edge.dst.node is node])
+        return {edge for edge in self.getEdges(dependenciesOnly=dependenciesOnly) if edge.dst.node is node}
 
     def _getInputEdgesPerNode(self, dependenciesOnly):
         nodeEdges = defaultdict(set)
@@ -892,7 +930,8 @@ class Graph(BaseObject):
     def dfs(self, visitor, startNodes=None, longestPathFirst=False):
         # Default direction (visitor.reverse=False): from node to root
         # Reverse direction (visitor.reverse=True): from node to leaves
-        nodeChildren = self._getOutputEdgesPerNode(visitor.dependenciesOnly) if visitor.reverse else self._getInputEdgesPerNode(visitor.dependenciesOnly)
+        nodeChildren = self._getOutputEdgesPerNode(visitor.dependenciesOnly) \
+                       if visitor.reverse else self._getInputEdgesPerNode(visitor.dependenciesOnly)
         # Initialize color map
         colors = {}
         for u in self._nodes:
@@ -901,9 +940,11 @@ class Graph(BaseObject):
         if longestPathFirst and visitor.reverse:
             # Because we have no knowledge of the node's count between a node and its leaves,
             # it is not possible to handle this case at the moment
-            raise NotImplementedError("Graph.dfs(): longestPathFirst=True and visitor.reverse=True are not compatible yet.")
+            raise NotImplementedError("Graph.dfs(): longestPathFirst=True and visitor.reverse=True are not "
+                                      "compatible yet.")
 
-        nodes = startNodes or (self.getRootNodes(visitor.dependenciesOnly) if visitor.reverse else self.getLeafNodes(visitor.dependenciesOnly))
+        nodes = startNodes or (self.getRootNodes(visitor.dependenciesOnly)
+                               if visitor.reverse else self.getLeafNodes(visitor.dependenciesOnly))
 
         if longestPathFirst:
             # Graph topology must be known and node depths up-to-date
@@ -1028,7 +1069,7 @@ class Graph(BaseObject):
                 nodes.append(vertex)  # We could collect specific chunks
 
         def finishEdge(edge, graph):
-            if edge[0].hasStatus(Status.SUCCESS) or edge[1].hasStatus(Status.SUCCESS):
+            if edge[0].isComputed or edge[1].isComputed:
                 return
             edges.append(edge)
 
@@ -1039,9 +1080,10 @@ class Graph(BaseObject):
         return nodes, edges
 
     @Slot(Node, result=bool)
-    def canCompute(self, node):
+    def canComputeTopologically(self, node):
         """
         Return the computability of a node based on itself and its dependency chain.
+        It is a static result as it depends on the graph topology.
         Computation can't happen for:
          - CompatibilityNodes
          - nodes having a non-computed CompatibilityNode in its dependency chain
@@ -1067,7 +1109,7 @@ class Graph(BaseObject):
         self._computationBlocked.clear()
 
         compatNodes = []
-        visitor = Visitor(reverse=False, dependenciesOnly=True)
+        visitor = Visitor(reverse=False, dependenciesOnly=False)
 
         def discoverVertex(vertex, graph):
             # initialize depths
@@ -1107,7 +1149,7 @@ class Graph(BaseObject):
         self.dfs(visitor=visitor, startNodes=leaves)
 
         # update graph computability status
-        canComputeLeaves = all([self.canCompute(node) for node in leaves])
+        canComputeLeaves = all([self.canComputeTopologically(node) for node in leaves])
         if self._canComputeLeaves != canComputeLeaves:
             self._canComputeLeaves = canComputeLeaves
             self.canComputeLeavesChanged.emit()
@@ -1124,7 +1166,7 @@ class Graph(BaseObject):
         :return:
         """
         nodesStack = []
-        edgesScore = defaultdict(lambda: 0)
+        edgesScore = defaultdict(int)
         visitor = Visitor(reverse=False, dependenciesOnly=dependenciesOnly)
 
         def finishEdge(edge, graph):
@@ -1180,7 +1222,7 @@ class Graph(BaseObject):
     def getInputNodes(self, node, recursive, dependenciesOnly):
         """ Return either the first level input nodes of a node or the whole chain. """
         if not recursive:
-            return set([edge.src.node for edge in self.getEdges(dependenciesOnly) if edge.dst.node is node])
+            return {edge.src.node for edge in self.getEdges(dependenciesOnly) if edge.dst.node is node}
 
         inputNodes, edges = self.dfsOnDiscover(startNodes=[node], filterTypes=None, reverse=False)
         return inputNodes[1:]  # exclude current node
@@ -1188,7 +1230,7 @@ class Graph(BaseObject):
     def getOutputNodes(self, node, recursive, dependenciesOnly):
         """ Return either the first level output nodes of a node or the whole chain. """
         if not recursive:
-            return set([edge.dst.node for edge in self.getEdges(dependenciesOnly) if edge.src.node is node])
+            return {edge.dst.node for edge in self.getEdges(dependenciesOnly) if edge.src.node is node}
 
         outputNodes, edges = self.dfsOnDiscover(startNodes=[node], filterTypes=None, reverse=True)
         return outputNodes[1:]  # exclude current node
@@ -1197,6 +1239,7 @@ class Graph(BaseObject):
     def canSubmitOrCompute(self, startNode):
         """
         Check if a node can be submitted/computed.
+        It does not depend on the topology of the graph and is based on the node status and its dependencies.
 
         Returns:
             int: 0 = cannot be submitted or computed /
@@ -1209,7 +1252,7 @@ class Graph(BaseObject):
 
         class SCVisitor(Visitor):
             def __init__(self, reverse, dependenciesOnly):
-                super(SCVisitor, self).__init__(reverse, dependenciesOnly)
+                super().__init__(reverse, dependenciesOnly)
 
             canCompute = True
             canSubmit = True
@@ -1224,48 +1267,72 @@ class Graph(BaseObject):
         self.dfs(visitor=visitor, startNodes=[startNode])
         return visitor.canCompute + (2 * visitor.canSubmit)
 
-
     def _applyExpr(self):
         with GraphModification(self):
             for node in self._nodes:
                 node._applyExpr()
 
     def toDict(self):
-        return {k: node.toDict() for k, node in self._nodes.objects.items()}
+        nodes = {k: node.toDict() for k, node in self._nodes.objects.items()}
+        nodes = dict(sorted(nodes.items()))
+        return nodes
 
     @Slot(result=str)
     def asString(self):
         return str(self.toDict())
 
+    def copy(self) -> "Graph":
+        """Create a copy of this Graph instance."""
+        graph = Graph("")
+        graph._deserialize(self.serialize())
+        return graph
+
+    def serialize(self, asTemplate: bool = False) -> dict:
+        """Serialize this Graph instance.
+        
+        Args:
+            asTemplate: Whether to use the template serialization.
+
+        Returns:
+            The serialized graph data.
+        """
+        SerializerClass = TemplateGraphSerializer if asTemplate else GraphSerializer
+        return SerializerClass(self).serialize()
+
+    def serializePartial(self, nodes: list[Node]) -> dict:
+        """Partially serialize this graph considering only the given list of `nodes`.
+
+        Args:
+            nodes: The list of nodes to serialize.
+
+        Returns:
+            The serialized graph data.
+        """
+        return PartialGraphSerializer(self, nodes=nodes).serialize()
+
     def save(self, filepath=None, setupProjectFile=True, template=False):
+        """
+        Save the current Meshroom graph as a serialized ".mg" file.
+
+        Args:
+            filepath: project filepath to save as.
+            setupProjectFile: Store the reference to the project file and setup the cache directory.
+                              If false, it only saves the graph of the project file as a template.
+            template: If true, saves the current graph as a template.
+        """
+        # Update the saving flag indicating that the current graph is being saved
+        self._saving = True
+        try:
+            self._save(filepath=filepath, setupProjectFile=setupProjectFile, template=template)
+        finally:
+            self._saving = False
+
+    def _save(self, filepath=None, setupProjectFile=True, template=False):
         path = filepath or self._filepath
         if not path:
-            raise ValueError("filepath must be specified for unsaved files.")
+            path = generateTempProjectFilepath()
 
-        self.header[Graph.IO.Keys.ReleaseVersion] = meshroom.__version__
-        self.header[Graph.IO.Keys.FileVersion] = Graph.IO.__version__
-
-        # store versions of node types present in the graph (excluding CompatibilityNode instances)
-        usedNodeTypes = set([n.nodeDesc.__class__ for n in self._nodes if isinstance(n, Node)])
-
-        self.header[Graph.IO.Keys.NodesVersions] = {
-            "{}".format(p.__name__): meshroom.core.nodeVersion(p, "0.0")
-            for p in usedNodeTypes
-        }
-
-        self.header["template"] = template
-
-        data = {}
-        if template:
-            data = {
-                Graph.IO.Keys.Header: self.header,
-                Graph.IO.Keys.Graph: self.getNonDefaultInputAttributes()
-            }
-        else:
-            data = {
-                Graph.IO.Keys.Header: self.header,
-                Graph.IO.Keys.Graph: self.toDict()
-            }
+        data = self.serialize(template)
 
         with open(path, 'w') as jsonFile:
             json.dump(data, jsonFile, indent=4)
@@ -1273,50 +1340,23 @@ class Graph(BaseObject):
         if path != self._filepath and setupProjectFile:
             self._setFilepath(path)
 
-    def getNonDefaultInputAttributes(self):
+        # update the file date version
+        self._fileDateVersion = os.path.getmtime(path)
+
+    def saveAsTemp(self, tmpFolder=None):
         """
-        Instead of getting all the inputs and internal attribute keys, only get the keys of
-        the attributes whose value is not the default one.
-        The output attributes, UIDs, parallelization parameters and internal folder are
-        not relevant for templates, so they are explicitly removed from the returned dictionary.
-
-        Returns:
-            dict: self.toDict() with the output attributes, UIDs, parallelization parameters, internal folder
-            and input/internal attributes with default values removed
+        Save the current Meshroom graph as a temporary project file.
         """
-        graph = self.toDict()
-        for nodeName in graph.keys():
-            node = self.node(nodeName)
+        # Update the saving flag indicating that the current graph is being saved
+        self._saving = True
+        try:
+            self._saveAsTemp(tmpFolder)
+        finally:
+            self._saving = False
 
-            inputKeys = list(graph[nodeName]["inputs"].keys())
-
-            internalInputKeys = []
-            internalInputs = graph[nodeName].get("internalInputs", None)
-            if internalInputs:
-                internalInputKeys = list(internalInputs.keys())
-
-            for attrName in inputKeys:
-                attribute = node.attribute(attrName)
-                # check that attribute is not a link for choice attributes
-                if attribute.isDefault and not attribute.isLink:
-                    del graph[nodeName]["inputs"][attrName]
-
-            for attrName in internalInputKeys:
-                attribute = node.internalAttribute(attrName)
-                # check that internal attribute is not a link for choice attributes
-                if attribute.isDefault and not attribute.isLink:
-                    del graph[nodeName]["internalInputs"][attrName]
-
-            # If all the internal attributes are set to their default values, remove the entry
-            if len(graph[nodeName]["internalInputs"]) == 0:
-                del graph[nodeName]["internalInputs"]
-
-            del graph[nodeName]["outputs"]
-            del graph[nodeName]["uids"]
-            del graph[nodeName]["internalFolder"]
-            del graph[nodeName]["parallelization"]
-
-        return graph
+    def _saveAsTemp(self, tmpFolder=None):
+        projectPath = generateTempProjectFilepath(tmpFolder)
+        self._save(projectPath)
 
     def _setFilepath(self, filepath):
         """
@@ -1342,7 +1382,7 @@ class Graph(BaseObject):
     def _unsetFilepath(self):
         self._filepath = ""
         self.name = ""
-        self.cacheDir = meshroom.core.defaultCacheFolder
+        self.cacheDir = ""
         self.filepathChanged.emit()
 
     def updateInternals(self, startNodes=None, force=False):
@@ -1361,13 +1401,13 @@ class Graph(BaseObject):
             node.updateStatisticsFromCache()
 
     def updateNodesPerUid(self):
-        """ Update the duplicate nodes (sharing same uid) list of each node. """
-        # First step is to construct a map uid/nodes
+        """ Update the duplicate nodes (sharing same UID) list of each node. """
+        # First step is to construct a map UID/nodes
         nodesPerUid = {}
         for node in self.nodes:
-            uid = node._uids.get(0)
+            uid = node._uid
 
-            # We try to add the node to the list corresponding to this uid
+            # We try to add the node to the list corresponding to this UID
             try:
                 nodesPerUid.get(uid).append(node)
             # If it fails because the uid is not in the map, we add it
@@ -1477,11 +1517,6 @@ class Graph(BaseObject):
         return self._edges
 
     @property
-    def importedNodes(self):
-        """" Return the list of nodes that were added to the graph with the latest 'Import Project' action. """
-        return self._importedNodes
-
-    @property
     def cacheDir(self):
         return self._cacheDir
 
@@ -1495,20 +1530,35 @@ class Graph(BaseObject):
         self.updateStatusFromCache(force=True)
         self.cacheDirChanged.emit()
 
+    @property
+    def fileDateVersion(self):
+        return self._fileDateVersion
+
+    @fileDateVersion.setter
+    def fileDateVersion(self, value):
+        self._fileDateVersion = value
+
+    @Slot(str, result=float)
+    def getFileDateVersionFromPath(self, value):
+        return os.path.getmtime(value)
+
     def setVerbose(self, v):
         with GraphModification(self):
             for node in self._nodes:
                 if node.hasAttribute('verbose'):
                     try:
                         node.verbose.value = v
-                    except:
+                    except Exception:
                         pass
 
     nodes = Property(BaseObject, nodes.fget, constant=True)
     edges = Property(BaseObject, edges.fget, constant=True)
     filepathChanged = Signal()
     filepath = Property(str, lambda self: self._filepath, notify=filepathChanged)
-    fileReleaseVersion = Property(str, lambda self: self.header.get(Graph.IO.Keys.ReleaseVersion, "0.0"), notify=filepathChanged)
+    isSaving = Property(bool, isSaving.fget, constant=True)
+    fileReleaseVersion = Property(str, lambda self: self.header.get(GraphIO.Keys.ReleaseVersion, "0.0"),
+                                  notify=filepathChanged)
+    fileDateVersion = Property(float, fileDateVersion.fget, fileDateVersion.fset, notify=filepathChanged)
     cacheDirChanged = Signal()
     cacheDir = Property(str, cacheDir.fget, cacheDir.fset, notify=cacheDirChanged)
     updated = Signal()
@@ -1516,11 +1566,27 @@ class Graph(BaseObject):
     canComputeLeaves = Property(bool, lambda self: self._canComputeLeaves, notify=canComputeLeavesChanged)
 
 
-def loadGraph(filepath):
+def loadGraph(filepath, strictCompatibility: bool = False) -> Graph:
     """
+    Load a Graph from a Meshroom Graph (.mg) file.
+
+    Args:
+        filepath: The path to the Meshroom Graph file.
+        strictCompatibility: If True, raise a GraphCompatibilityError if the loaded Graph has node compatibility issues.
+
+    Returns:
+        Graph: The loaded Graph instance.
+
+    Raises:
+        GraphCompatibilityError: If the Graph has node compatibility issues and `strictCompatibility` is True.
     """
     graph = Graph("")
     graph.load(filepath)
+
+    compatibilityIssues = len(graph.compatibilityNodes) > 0
+    if compatibilityIssues and strictCompatibility:
+        raise GraphCompatibilityError(filepath, {n.name: str(n.issue) for n in graph.compatibilityNodes})
+
     graph.update()
     return graph
 
@@ -1544,7 +1610,7 @@ def executeGraph(graph, toNodes=None, forceCompute=False, forceStatus=False):
         chunksInConflict = getAlreadySubmittedChunks(nodes)
 
         if chunksInConflict:
-            chunksStatus = set([chunk.status.status.name for chunk in chunksInConflict])
+            chunksStatus = {chunk.status.status.name for chunk in chunksInConflict}
             chunksName = [node.name for node in chunksInConflict]
             msg = 'WARNING: Some nodes are already submitted with status: {}\nNodes: {}'.format(
                   ', '.join(chunksStatus),
@@ -1557,11 +1623,14 @@ def executeGraph(graph, toNodes=None, forceCompute=False, forceStatus=False):
 
     print('Nodes to execute: ', str([n.name for n in nodes]))
 
+    graph.save()
+
     for node in nodes:
         node.beginSequence(forceCompute)
 
     for n, node in enumerate(nodes):
         try:
+            node.preprocess()
             multiChunks = len(node.chunks) > 1
             for c, chunk in enumerate(node.chunks):
                 if multiChunks:
@@ -1569,11 +1638,11 @@ def executeGraph(graph, toNodes=None, forceCompute=False, forceStatus=False):
                         node=n+1, nbNodes=len(nodes),
                         chunk=c+1, nbChunks=len(node.chunks), nodeName=node.nodeType))
                 else:
-                    print('\n[{node}/{nbNodes}] {nodeName}'.format(
-                        node=n + 1, nbNodes=len(nodes), nodeName=node.nodeType))
+                    print(f'\n[{n + 1}/{len(nodes)}] {node.nodeType}')
                 chunk.process(forceCompute)
+            node.postprocess()
         except Exception as e:
-            logging.error("Error on node computation: {}".format(e))
+            logging.error(f"Error on node computation: {e}")
             graph.clearSubmittedNodes()
             raise
 
@@ -1590,8 +1659,8 @@ def submitGraph(graph, submitter, toNodes=None, submitLabel="{projectName}"):
         logging.warning('Nothing to compute')
         return
 
-    logging.info("Nodes to process: {}".format(edgesToProcess))
-    logging.info("Edges to process: {}".format(edgesToProcess))
+    logging.info(f"Nodes to process: {edgesToProcess}")
+    logging.info(f"Edges to process: {edgesToProcess}")
 
     sub = None
     if submitter:
@@ -1609,7 +1678,7 @@ def submitGraph(graph, submitter, toNodes=None, submitLabel="{projectName}"):
             for node in nodesToProcess:
                 node.submit()  # update node status
     except Exception as e:
-        logging.error("Error on submit : {}".format(e))
+        logging.error(f"Error on submit : {e}")
 
 
 def submit(graphFile, submitter, toNode=None, submitLabel="{projectName}"):
@@ -1619,4 +1688,3 @@ def submit(graphFile, submitter, toNode=None, submitLabel="{projectName}"):
     graph = loadGraph(graphFile)
     toNodes = graph.findNodes(toNode) if toNode else None
     submitGraph(graph, submitter, toNodes, submitLabel=submitLabel)
-

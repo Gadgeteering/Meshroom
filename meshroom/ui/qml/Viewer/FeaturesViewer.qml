@@ -1,12 +1,13 @@
-import QtQuick 2.11
-import AliceVision 1.0 as AliceVision
+import QtQuick
 
+import AliceVision 1.0 as AliceVision
 import Utils 1.0
 
 /**
  * FeaturesViewer displays the extracted feature points of a View.
  * Requires QtAliceVision plugin.
  */
+
 Repeater {
     id: root
 
@@ -52,6 +53,7 @@ Repeater {
 
     /// Current view ID
     property var currentViewId
+    property bool syncFeaturesSelected: false
 
     /// Time window
     property bool enableTimeWindow: false
@@ -59,7 +61,7 @@ Repeater {
 
     model: root.describerTypes
 
-    // instantiate one FeaturesViewer by describer type
+    // Instantiate one FeaturesViewer by describer type
     delegate: AliceVision.FeaturesViewer {
         readonly property int colorIndex: (index + colorOffset) % root.colors.length
         property int colorOffset: 0
@@ -75,7 +77,7 @@ Repeater {
         matchColor: Colors.orange
         landmarkColor: Colors.red
         describerType: modelData
-        currentViewId: root.currentViewId
+        currentViewId: syncFeaturesSelected ? _reconstruction.pickedViewId : root.currentViewId
         enableTimeWindow: root.enableTimeWindow
         timeWindow: root.timeWindow
         mfeatures: root.features

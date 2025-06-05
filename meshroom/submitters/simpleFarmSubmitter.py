@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-# coding:utf-8
 
 import os
 import json
 import logging
+import getpass
 
 import simpleFarm
 from meshroom.core.desc import Level
@@ -23,7 +23,7 @@ class SimpleFarmSubmitter(BaseSubmitter):
     DEFAULT_TAGS = {'prod': ''}
 
     def __init__(self, parent=None):
-        super(SimpleFarmSubmitter, self).__init__(name='SimpleFarm', parent=parent)
+        super().__init__(name='SimpleFarm', parent=parent)
         self.engine = os.environ.get('MESHROOM_SIMPLEFARM_ENGINE', 'tractor')
         self.share = os.environ.get('MESHROOM_SIMPLEFARM_SHARE', 'vfx')
         self.prod = os.environ.get('PROD', 'mvg')
@@ -38,16 +38,16 @@ class SimpleFarmSubmitter(BaseSubmitter):
                 # logging.info('REZ: {}'.format(str(r)))
                 v = r.split('-')
                 # logging.info('    v: {}'.format(str(v)))
-                if len(v) == 2:
+                if len(v) >= 2:
                     resolvedVersions[v[0]] = v[1]
             for p in packages:
                 if p.startswith('~'):
                     continue
                 v = p.split('-')
                 self.reqPackages.append('-'.join([v[0], resolvedVersions[v[0]]]))
-            logging.debug('REZ Packages: {}'.format(str(self.reqPackages)))
+            logging.debug(f'REZ Packages: {str(self.reqPackages)}')
         elif 'REZ_MESHROOM_VERSION' in os.environ:
-            self.reqPackages = ["meshroom-{}".format(os.environ.get('REZ_MESHROOM_VERSION', ''))]
+            self.reqPackages = [f"meshroom-{os.environ.get('REZ_MESHROOM_VERSION', '')}"]
         else:
             self.reqPackages = None
 
@@ -106,6 +106,7 @@ class SimpleFarmSubmitter(BaseSubmitter):
                 tags=mainTags,
                 requirements={'service': str(','.join(allRequirements))},
                 environment=self.environment,
+                user=os.environ.get('USER', os.environ.get('FARM_USER', getpass.getuser())),
                 )
 
         nodeNameToTask = {}

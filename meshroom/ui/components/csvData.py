@@ -1,7 +1,7 @@
 from meshroom.common.qt import QObjectListModel
 
-from PySide2.QtCore import QObject, Slot, Signal, Property
-from PySide2.QtCharts import QtCharts
+from PySide6.QtCore import QObject, Slot, Signal, Property
+from PySide6 import QtCharts
 
 import csv
 import os
@@ -77,7 +77,7 @@ class CsvData(QObject):
                 for idx, value in enumerate(elt):
                     dataList[idx].appendValue(value)
         except Exception as e:
-            logging.error("CsvData: Failed to load file: {}\n{}".format(self._filepath, str(e)))
+            logging.error(f"CsvData: Failed to load file: {self._filepath}\n{e}")
 
         return dataList
 

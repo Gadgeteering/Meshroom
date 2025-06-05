@@ -1,5 +1,6 @@
 from . import PySignal
 
+
 class CoreDictModel:
 
     def __init__(self, keyAttrName, **kwargs):
@@ -8,6 +9,9 @@ class CoreDictModel:
 
     def __len__(self):
         return len(self._objects)
+
+    def __bool__(self):
+        return bool(self._objects)
 
     def __iter__(self):
         """ Enables iteration over the list of objects. """
@@ -26,12 +30,18 @@ class CoreDictModel:
     def objects(self):
         return self._objects
 
-    # TODO: operator[]
     def get(self, key):
         """
-        Raises a KeyError if key is not in the map.
         :param key:
-        :return:
+        :return: the value or None if not found
+        """
+        return self._objects.get(key)
+
+    def getr(self, key):
+        """
+        Get or raise an error if the key does not exists.
+        :param key:
+        :return: the value
         """
         return self._objects[key]
 
@@ -116,13 +126,13 @@ def CoreSlot(*args, **kwargs):
 
 class CoreProperty(property):
     def __init__(self, ptype, fget=None, fset=None, **kwargs):
-        super(CoreProperty, self).__init__(fget, fset)
+        super().__init__(fget, fset)
 
 
-class CoreObject(object):
+class CoreObject:
 
     def __init__(self, parent=None, *args, **kwargs):
-        super(CoreObject, self).__init__()
+        super().__init__()
         self._parent = parent
         # Note: we do not use ClassSignal, as it can not be used in __del__.
         self.destroyed = PySignal.Signal()
