@@ -126,7 +126,7 @@ class TemplateGraphSerializer(GraphSerializer):
 
     def serializeNode(self, node: Node) -> dict:
         """Adapt node serialization to template graphs.
-        
+
         Instead of getting all the inputs and internal attribute keys, only get the keys of
         the attributes whose value is not the default one.
         The output attributes, UIDs, parallelization parameters and internal folder are
@@ -200,18 +200,18 @@ class PartialGraphSerializer(GraphSerializer):
         Serialize `attribute` (recursively for list/groups) and deal with attributes being connected
         to nodes that are not part of the partial list of nodes to serialize.
         """
-        linkParam = attribute.getLinkParam()
+        linkAttribute = attribute.inputLink
 
-        if linkParam is not None:
+        if linkAttribute is not None:
             # Use standard link serialization if upstream node is part of the serialization.
-            if linkParam.node in self.nodes:
-                return attribute.getExportValue()
+            if linkAttribute.node in self.nodes:
+                return attribute.getSerializedValue()
             # Skip link serialization otherwise.
             # If part of a list, this entry can be discarded.
             if isinstance(attribute.root, ListAttribute):
                 return None
             # Otherwise, return the default value for this attribute.
-            return attribute.defaultValue()
+            return attribute.getDefaultValue()
 
         if isinstance(attribute, ListAttribute):
             # Recusively serialize each child of the ListAttribute, skipping those for which the attribute
@@ -226,6 +226,4 @@ class PartialGraphSerializer(GraphSerializer):
             # Recursively serialize each child of the group attribute.
             return {name: self._serializeAttribute(child) for name, child in attribute.value.items()}
 
-        return attribute.getExportValue()
-
-
+        return attribute.getSerializedValue()

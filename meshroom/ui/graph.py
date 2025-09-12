@@ -690,6 +690,51 @@ class UIGraph(QObject):
                 position = Position(node.x + offset.x(), node.y + offset.y())
                 self.moveNode(node, position)
 
+    def getMeanPosition(self):
+        """ Get the average Position of selected nodes """
+        # Not great, would be better if Position was a non-tuple class
+        selectedNodes = self.getSelectedNodes()
+        sum_pose = [0, 0]
+        nb_tot = 0
+        for selectedNode in selectedNodes:
+            sum_pose[0] += selectedNode.x
+            sum_pose[1] += selectedNode.y
+            nb_tot += 1
+        return Position(int(sum_pose[0] / nb_tot), int(sum_pose[1] / nb_tot))
+
+    @Slot()
+    def alignHorizontally(self):
+        """ All nodes are moved horizontally to the same position, on an average position of selected nodes """
+        nodePadding = 50
+        selectedNodes = self.getSelectedNodes()
+        if len(selectedNodes) < 2:
+            return
+        
+        # Make sure the list is correctly ordered
+        selectedNodes = sorted(selectedNodes, key=lambda node:node.x)
+        
+        meanX, meanY = self.getMeanPosition()
+        nodeWidth = self.layout.nodeWidth
+        # Compute the first node X position
+        totalWidth = len(selectedNodes) * nodeWidth + (len(selectedNodes) - 1) * nodePadding
+        startX = int(meanX - totalWidth / 2 + nodeWidth / 2)
+        with self.groupedGraphModification("Align nodes horizontally"):
+            for i, selectedNode in enumerate(selectedNodes):
+                x = startX + i * (nodeWidth + nodePadding)
+                self.moveNode(selectedNode, Position(x, meanY))
+
+    @Slot()
+    def alignVertically(self):
+        """ All nodes are moved vertically to the same position, on an average position of selected nodes """
+        selectedNodes = self.getSelectedNodes()
+        if len(selectedNodes) < 2:
+            return
+        
+        meanX, _ = self.getMeanPosition()
+        with self.groupedGraphModification("Align nodes vertically"):
+            for selectedNode in selectedNodes:
+                self.moveNode(selectedNode, Position(meanX, selectedNode.y))
+
     @Slot()
     def removeSelectedNodes(self):
         """Remove selected nodes from the graph."""
@@ -849,14 +894,14 @@ class UIGraph(QObject):
         if isinstance(src, ListAttribute) and not isinstance(dst, ListAttribute):
             self._addEdge(src.at(0), dst)
         elif isinstance(dst, ListAttribute) and not isinstance(src, ListAttribute):
-            with self.groupedGraphModification(f"Insert and Add Edge on {dst.getFullNameToNode()}"):
+            with self.groupedGraphModification(f"Insert and Add Edge on {dst.fullName}"):
                 self.appendAttribute(dst)
                 self._addEdge(src, dst.at(-1))
         else:
             self._addEdge(src, dst)
 
     def _addEdge(self, src, dst):
-        with self.groupedGraphModification(f"Connect '{src.getFullNameToNode()}'->'{dst.getFullNameToNode()}'"):
+        with self.groupedGraphModification(f"Connect '{src.fullName}'->'{dst.fullName}'"):
             if dst in self._graph.edges.keys():
                 self.removeEdge(self._graph.edge(dst))
             self.push(commands.AddEdgeCommand(self._graph, src, dst))
@@ -864,15 +909,34 @@ class UIGraph(QObject):
     @Slot(Edge)
     def removeEdge(self, edge):
         if isinstance(edge.dst.root, ListAttribute):
-            with self.groupedGraphModification(f"Remove Edge and Delete {edge.dst.getFullNameToNode()}"):
+            with self.groupedGraphModification(f"Remove Edge and Delete {edge.dst.fullName}"):
                 self.push(commands.RemoveEdgeCommand(self._graph, edge))
                 self.removeAttribute(edge.dst)
         else:
             self.push(commands.RemoveEdgeCommand(self._graph, edge))
 
+    @Slot(list)
+    def deleteEdgesByIndices(self, indices):
+        with self.groupedGraphModification("Remove Edges"):
+            copied = list(self._graph.edges)
+            for index in indices:
+                self.removeEdge(copied[index])
+
+    @Slot()
+    def disconnectSelectedNodes(self):
+        with self.groupedGraphModification("Disconnect Nodes"):
+            selectedNodes = self.getSelectedNodes()
+            for edge in self._graph.edges[:]:
+                # Remove only the edges which are coming or going out of the current selection
+                if edge.src.node in selectedNodes and edge.dst.node in selectedNodes:
+                    continue
+
+                if edge.dst.node in selectedNodes or edge.src.node in selectedNodes:
+                    self.removeEdge(edge)
+
     @Slot(Edge, Attribute, Attribute, result=Edge)
     def replaceEdge(self, edge, newSrc, newDst):
-        with self.groupedGraphModification(f"Replace Edge '{edge.src.getFullNameToNode()}'->'{edge.dst.getFullNameToNode()}' with '{newSrc.getFullNameToNode()}'->'{newDst.getFullNameToNode()}'"):
+        with self.groupedGraphModification(f"Replace Edge '{edge.src.fullName}'->'{edge.dst.fullName}' with '{newSrc.fullName}'->'{newDst.fullName}'"):
             self.removeEdge(edge)
             self.addEdge(newSrc, newDst)
         return self._graph.edge(newDst)
@@ -895,7 +959,7 @@ class UIGraph(QObject):
                     # if the edge is connected to one of the ListAttribute's elements, remove it
                     if edge.src in attribute.value:
                         self.removeEdge(edge)
-            self.push(commands.SetAttributeCommand(self._graph, attribute, attribute.defaultValue()))
+            self.push(commands.SetAttributeCommand(self._graph, attribute, attribute.getDefaultValue()))
 
     @Slot(CompatibilityNode, result=Node)
     def upgradeNode(self, node):
@@ -933,21 +997,23 @@ class UIGraph(QObject):
 
     @Slot(Attribute)
     def removeImage(self, image):
+        if image is None:
+            return
         with self.groupedGraphModification("Remove Image"):
             # look if the viewpoint's intrinsic is used by another viewpoint
             # if not, remove it
             intrinsicId = image.intrinsicId.value
 
             intrinsicUsed = False
-            for intrinsic in self.cameraInit.attribute("viewpoints").getExportValue():
-                if image.getExportValue() != intrinsic and intrinsic['intrinsicId'] == intrinsicId:
+            for intrinsic in self.cameraInit.attribute("viewpoints").getSerializedValue():
+                if image.getSerializedValue() != intrinsic and intrinsic['intrinsicId'] == intrinsicId:
                     intrinsicUsed = True
                     break
 
             if not intrinsicUsed:
                 #find the intrinsic and remove it
                 for intrinsic in self.cameraInit.attribute("intrinsics"):
-                    if intrinsic.getExportValue()["intrinsicId"] == intrinsicId:
+                    if intrinsic.getSerializedValue()["intrinsicId"] == intrinsicId:
                         self.removeAttribute(intrinsic)
                         break
 

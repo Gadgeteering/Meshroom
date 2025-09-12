@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import weakref
 from collections import defaultdict, OrderedDict
 from contextlib import contextmanager
+from pathlib import Path
 
 from enum import Enum
 
@@ -559,7 +560,7 @@ class Graph(BaseObject):
 
             # re-create edges taking into account what has been duplicated
             for attr, linkExpression in duplicateEdges.items():
-                # logging.warning("attr={} linkExpression={}".format(attr.fullName, linkExpression))
+                # logging.warning("attr={} linkExpression={}".format(attr.rootName, linkExpression))
                 link = linkExpression[1:-1]  # remove starting '{' and trailing '}'
                 # get source node and attribute name
                 edgeSrcNodeName, edgeSrcAttrName = link.split(".", 1)
@@ -593,12 +594,12 @@ class Graph(BaseObject):
         Remove the node identified by 'nodeName' from the graph.
         Returns:
             - a dictionary containing the incoming edges removed by this operation:
-                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+                {dstAttr.fullName, srcAttr.fullName}
             - a dictionary containing the outgoing edges removed by this operation:
-                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+                {dstAttr.fullName, srcAttr.fullName}
             - a dictionary containing the values, indices and keys of attributes that were connected to a ListAttribute
                 prior to the removal of all edges:
-                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
+                {dstAttr.fullName, (dstAttr.root.fullName, dstAttr.index, dstAttr.value)}
         """
         node = self.node(nodeName)
         inEdges = {}
@@ -613,13 +614,13 @@ class Graph(BaseObject):
             # - once we have collected all the information, the edges (and perhaps the entries in ListAttributes) can
             #   actually be removed
             for edge in self.nodeOutEdges(node):
-                outEdges[edge.dst.getFullNameToNode()] = edge.src.getFullNameToNode()
+                outEdges[edge.dst.fullName] = edge.src.fullName
 
                 if isinstance(edge.dst.root, ListAttribute):
                     index = edge.dst.root.index(edge.dst)
-                    outListAttributes[edge.dst.getFullNameToNode()] = (edge.dst.root.getFullNameToNode(),
-                                                                       index, edge.dst.value
-                                                                       if edge.dst.value else None)
+                    outListAttributes[edge.dst.fullName] = (edge.dst.root.fullName,
+                                                            index, edge.dst.value
+                                                            if edge.dst.value else None)
 
             for edge in self.nodeOutEdges(node):
                 self.removeEdge(edge.dst)
@@ -631,7 +632,7 @@ class Graph(BaseObject):
 
             for edge in self.nodeInEdges(node):
                 self.removeEdge(edge.dst)
-                inEdges[edge.dst.getFullNameToNode()] = edge.src.getFullNameToNode()
+                inEdges[edge.dst.fullName] = edge.src.fullName
 
             node.alive = False
             self._nodes.remove(node)
@@ -697,12 +698,12 @@ class Graph(BaseObject):
         Returns:
             - the upgraded (newly created) node
             - a dictionary containing the incoming edges removed by this operation:
-                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+                {dstAttr.fullName, srcAttr.fullName}
             - a dictionary containing the outgoing edges removed by this operation:
-                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+                {dstAttr.fullName, srcAttr.fullName}
             - a dictionary containing the values, indices and keys of attributes that were connected to a ListAttribute
                 prior to the removal of all edges:
-                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
+                {dstAttr.fullName, (dstAttr.root.fullName, dstAttr.index, dstAttr.value)}
         """
         node = self.node(nodeName)
         if not isinstance(node, CompatibilityNode):
@@ -729,10 +730,10 @@ class Graph(BaseObject):
         
         Args:
             outEdges: a dictionary containing the outgoing edges removed by a call to "removeNode".
-                {dstAttr.getFullNameToNode(), srcAttr.getFullNameToNode()}
+                {dstAttr.fullName, srcAttr.fullName}
             outListAttributes: a dictionary containing the values, indices and keys of attributes that were connected
                 to a ListAttribute prior to the removal of all edges.
-                {dstAttr.getFullNameToNode(), (dstAttr.root.getFullNameToNode(), dstAttr.index, dstAttr.value)}
+                {dstAttr.fullName, (dstAttr.root.fullName, dstAttr.index, dstAttr.value)}
         """
         def _recreateTargetListAttributeChildren(listAttrName: str, index: int, value: Any):
             listAttr = self.attribute(listAttrName)
@@ -748,7 +749,12 @@ class Graph(BaseObject):
             if dstName in outListAttributes:
                 _recreateTargetListAttributeChildren(*outListAttributes[dstName])
             try:
-                self.addEdge(self.attribute(srcName), self.attribute(dstName))
+                srcAttr = self.attribute(srcName)
+                dstAttr = self.attribute(dstName)
+                if srcAttr is None or dstAttr is None:
+                    logging.warning(f"Failed to restore edge {srcName}{' (missing)' if srcAttr is None else ''} -> {dstName}{' (missing)' if dstAttr is None else ''}")
+                    continue
+                self.addEdge(srcAttr, dstAttr)
             except (KeyError, ValueError) as e:
                 logging.warning(f"Failed to restore edge {srcName} -> {dstName}: {e}")
 
@@ -758,6 +764,30 @@ class Graph(BaseObject):
         with GraphModification(self):
             for nodeName in nodeNames:
                 self.upgradeNode(nodeName)
+
+    def reloadNodePlugins(self, nodeTypes: list[str]):
+        """
+        Replace all the node instances of "nodeTypes" in the current graph with new node instances of the
+        same type. If the description of the nodes has changed, the reloaded nodes will reflect theses
+        changes. If "nodeTypes" is empty, then the function returns immediately.
+
+        Args:
+            nodeTypes: the list of node types that will be reloaded.
+        """
+        if not nodeTypes:
+            # No updated node to replace in the graph, nothing to do
+            return
+
+        newNodes: dict[str, BaseNode] = {}
+        for node in self._nodes.values():
+            if node.nodeType in nodeTypes:
+                newNode = nodeFactory(node.toDict(), node.nodeType, expectedUid=node._uid)
+                newNodes[node.name] = newNode
+
+        # Replace in a different loop to ensure all the nodes have been looped over: when looping
+        # over self._nodes and replacing nodes at the same time, some nodes might not be reached
+        for name, node in newNodes.items():
+            self.replaceNode(name, node)
 
     @Slot(str, result=Attribute)
     def attribute(self, fullName):
@@ -869,13 +899,13 @@ class Graph(BaseObject):
         if srcAttr.node.graph != self or dstAttr.node.graph != self:
             raise RuntimeError('The attributes of the edge should be part of a common graph.')
         if dstAttr in self.edges.keys():
-            raise RuntimeError(f'Destination attribute "{dstAttr.getFullNameToNode()}" is already connected.')
+            raise RuntimeError(f'Destination attribute "{dstAttr.fullName}" is already connected.')
         edge = Edge(srcAttr, dstAttr)
         self.edges.add(edge)
         self.markNodesDirty(dstAttr.node)
         dstAttr.valueChanged.emit()
-        dstAttr.isLinkChanged.emit()
-        srcAttr.hasOutputConnectionsChanged.emit()
+        dstAttr.inputLinksChanged.emit()
+        srcAttr.outputLinksChanged.emit()
         return edge
 
     def addEdges(self, *edges):
@@ -886,12 +916,12 @@ class Graph(BaseObject):
     @changeTopology
     def removeEdge(self, dstAttr):
         if dstAttr not in self.edges.keys():
-            raise RuntimeError(f'Attribute "{dstAttr.getFullNameToNode()}" is not connected')
+            raise RuntimeError(f'Attribute "{dstAttr.fullName}" is not connected')
         edge = self.edges.pop(dstAttr)
         self.markNodesDirty(dstAttr.node)
         dstAttr.valueChanged.emit()
-        dstAttr.isLinkChanged.emit()
-        edge.src.hasOutputConnectionsChanged.emit()
+        dstAttr.inputLinksChanged.emit()
+        edge.src.outputLinksChanged.emit()
 
     def getDepth(self, node, minimal=False):
         """ Return node's depth in this Graph.
@@ -1212,7 +1242,7 @@ class Graph(BaseObject):
             attr = e.src
             if dependenciesOnly:
                 if attr.isLink:
-                    attr = attr.getLinkParam(recursive=True)
+                    attr = attr.inputRootLink
                 if not attr.isOutput:
                     continue
             newE = Edge(attr, e.dst)
@@ -1282,14 +1312,15 @@ class Graph(BaseObject):
         return str(self.toDict())
 
     def copy(self) -> "Graph":
-        """Create a copy of this Graph instance."""
+        """ Create a copy of this Graph instance. """
         graph = Graph("")
         graph._deserialize(self.serialize())
         return graph
 
     def serialize(self, asTemplate: bool = False) -> dict:
-        """Serialize this Graph instance.
-        
+        """
+        Serialize this Graph instance.
+
         Args:
             asTemplate: Whether to use the template serialization.
 
@@ -1300,7 +1331,8 @@ class Graph(BaseObject):
         return SerializerClass(self).serialize()
 
     def serializePartial(self, nodes: list[Node]) -> dict:
-        """Partially serialize this graph considering only the given list of `nodes`.
+        """
+        Partially serialize this graph considering only the given list of `nodes`.
 
         Args:
             nodes: The list of nodes to serialize.
@@ -1369,9 +1401,12 @@ class Graph(BaseObject):
             self._unsetFilepath()
             return
 
-        if self._filepath == filepath:
+        # Make sure the path is stored using the POSIX convention
+        # so that it can be used when creating sub-processes for node execution.
+        newFilepath = Path(filepath).as_posix()
+        if self._filepath == newFilepath:
             return
-        self._filepath = filepath
+        self._filepath = newFilepath
         # For now:
         #  * cache folder is located next to the graph file
         #  * graph name if the basename of the graph file

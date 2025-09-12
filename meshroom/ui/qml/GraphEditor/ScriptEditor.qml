@@ -7,7 +7,7 @@ import Controls 1.0
 import MaterialIcons 2.2
 import Utils 1.0
 
-import Qt.labs.platform 1.0 as Platform
+import Qt.labs.platform as Platform
 
 import ScriptEditor 1.0
 
@@ -105,7 +105,6 @@ Item {
 
     Platform.FileDialog {
         id: loadScriptDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Load Script"
         nameFilters: ["Python Script (*.py)"]
         onAccepted: {
@@ -116,7 +115,6 @@ Item {
 
     Platform.FileDialog {
         id: saveScriptDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Save script"
         nameFilters: ["Python Script (*.py)"]
         fileMode: Platform.FileDialog.SaveFile

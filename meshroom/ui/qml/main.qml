@@ -4,7 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 
-import Qt.labs.platform 1.0 as Platform
+import Qt.labs.platform as Platform
 
 ApplicationWindow {
     id: _window
@@ -111,8 +111,10 @@ ApplicationWindow {
             // If the dialog that's being opened is the "import images" dialog, use the "imagesFolder" property
             // which contains the last folder used to import images rather than the folder in which
             // projects have been saved
-            if (importImages && currentItem.imagesFolder.toString() !== "" && Filepath.exists(imagesFolder)) {
-                folder = currentItem.imagesFolder
+
+            const imageFolderPath = currentItem.imagesFolder.toString()
+            if (importImages && imageFolderPath !== "" && Filepath.exists(imageFolderPath)) {
+                folder = Filepath.stringToUrl(imageFolderPath)
             }
         }
 
@@ -121,7 +123,6 @@ ApplicationWindow {
 
     Platform.FileDialog {
         id: openFileDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Open File"
         nameFilters: ["Meshroom Graphs (*.mg)"]
         onAccepted: {

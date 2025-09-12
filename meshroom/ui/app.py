@@ -13,7 +13,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication
 
 import meshroom
-from meshroom.core import nodesDesc
+from meshroom.core import pluginManager
 from meshroom.core.taskManager import TaskManager
 from meshroom.common import Property, Variant, Signal, Slot
 
@@ -203,7 +203,7 @@ class MeshroomApp(QApplication):
 
         args = createMeshroomParser(inputArgs)
         qtArgs = []
-    
+
         if EnvVar.get(EnvVar.MESHROOM_QML_DEBUG):
             debuggerParams = EnvVar.get(EnvVar.MESHROOM_QML_DEBUG_PARAMS)
             self.debugger = QQmlDebuggingEnabler(printWarning=True)
@@ -261,7 +261,7 @@ class MeshroomApp(QApplication):
         self.engine.addImportPath(qmlDir)
 
         # expose available node types that can be instantiated
-        self.engine.rootContext().setContextProperty("_nodeTypes", {n: {"category": nodesDesc[n].category} for n in sorted(nodesDesc.keys())})
+        self.engine.rootContext().setContextProperty("_nodeTypes", {n: {"category": pluginManager.getRegisteredNodePlugins()[n].nodeDescriptor.category} for n in sorted(pluginManager.getRegisteredNodePlugins().keys())})
 
         # instantiate Reconstruction object
         self._undoStack = commands.UndoStack(self)
@@ -330,6 +330,11 @@ class MeshroomApp(QApplication):
             self.addRecentProjectFile(args.save)
 
         self.engine.load(os.path.normpath(url))
+
+    def terminateManual(self):
+        self.engine.clearComponentCache()
+        self.engine.collectGarbage()
+        self.engine.deleteLater()
 
     def _pipelineTemplateFiles(self):
         templates = []
@@ -673,10 +678,26 @@ class MeshroomApp(QApplication):
         ]
 
     def _default8bitViewerEnabled(self):
-        return bool(os.environ.get("MESHROOM_USE_8BIT_VIEWER", False))
-    
+        return self._getEnvironmentVariableValue("MESHROOM_USE_8BIT_VIEWER", False)
+
     def _defaultSequencePlayerEnabled(self):
-        return bool(os.environ.get("MESHROOM_USE_SEQUENCE_PLAYER", True))
+        return self._getEnvironmentVariableValue("MESHROOM_USE_SEQUENCE_PLAYER", True)
+
+    def _getEnvironmentVariableValue(self, key: str, defaultValue: bool) -> bool:
+        """
+        Fetch the value of a provided environment variable if it exists, and ensure it is correctly
+        evaluated.
+
+        Args:
+            key: the key for the environment variable
+            defaultValue: the value to use if the key does not exist
+        """
+        val = os.environ.get(key, defaultValue)
+        # os.environ.get returns a string if the key exists, no matter its value, and converting a
+        # string to a bool always evaluates to "True"
+        if val != True and str(val).lower() in ("0", "false", "off"):
+            return False
+        return True
 
     activeProjectChanged = Signal()
     activeProject = Property(Variant, lambda self: self._activeProject, notify=activeProjectChanged)

@@ -54,7 +54,7 @@ def compareGraphsContent(graphA: Graph, graphB: Graph) -> bool:
         return set([(node.name, node.nodeType, node.isCompatibilityNode) for node in graph.nodes])
 
     def _buildEdgesSet(graph: Graph):
-        return set([(edge.src.fullName, edge.dst.fullName) for edge in graph.edges])
+        return set([(edge.src.rootName, edge.dst.rootName) for edge in graph.edges])
 
     nodesSetA, edgesSetA = _buildNodesSet(graphA), _buildEdgesSet(graphA)
     nodesSetB, edgesSetB = _buildNodesSet(graphB), _buildEdgesSet(graphB)
@@ -213,6 +213,7 @@ class TestImportGraphContent:
         assert len(otherGraph.compatibilityNodes) == 1
         assert otherGraph.node(node.name).issue is CompatibilityIssue.VersionConflict
 
+
 class TestGraphPartialSerialization:
     def test_emptyGraph(self):
         graph = Graph("")
@@ -255,7 +256,8 @@ class TestGraphPartialSerialization:
             otherGraph = Graph("")
             otherGraph._deserialize(graph.serializePartial([nodeA, nodeB]))
 
-            assert otherGraph.node(nodeB.name).listInput.linkParam == otherGraph.node(nodeA.name).listInput
+            assert otherGraph.node(nodeB.name).listInput.inputLink == \
+                otherGraph.node(nodeA.name).listInput
 
     def test_singleNodeWithInputConnectionFromNonSerializedNodeRemovesEdge(self):
         graph = Graph("")
@@ -356,8 +358,8 @@ class TestImportGraphContentFromMinimalGraphData:
         with registeredNodeTypes([SimpleNode]):
             sampleGraphContent = dedent("""
             {
-                "SimpleNode_1": { 
-                    "nodeType": "SimpleNode", "inputs": { "input": "{NotSerializedNode.output}" } 
+                "SimpleNode_1": {
+                    "nodeType": "SimpleNode", "inputs": { "input": "{NotSerializedNode.output}" }
                 }
             }
             """)

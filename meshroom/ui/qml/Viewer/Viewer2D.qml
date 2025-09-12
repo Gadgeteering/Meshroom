@@ -455,7 +455,7 @@ FocusScope {
                 
             }
 
-            mousePosition: (floatImageViewerLoader.item.containsMouse ? {
+            mousePosition: (floatImageViewerLoader.item && floatImageViewerLoader.item.containsMouse ? {
                     x: Math.floor(floatImageViewerLoader.item.mouseX), 
                     y: Math.floor(floatImageViewerLoader.item.mouseY)
                 } : null)
@@ -507,7 +507,6 @@ FocusScope {
                     orientationTag: imgContainer.orientationTag
                     xOrigin: imgContainer.width / 2
                     yOrigin: imgContainer.height / 2
-                    property real targetSize: Math.max(width, height) * imgContainer.scale
                     property real resizeRatio: imgContainer.scale
 
                     function sizeChanged() {
@@ -590,7 +589,6 @@ FocusScope {
                                 "cropFisheye": false,
                                 "sequence": Qt.binding(function() { return ((root.enableSequencePlayer && (_reconstruction || (root.displayedNode && root.displayedNode.hasSequenceOutput))) ? getSequence() : []) }),
                                 "resizeRatio": Qt.binding(function() { return floatImageViewerLoader.resizeRatio }),
-                                "targetSize": Qt.binding(function() { return floatImageViewerLoader.targetSize }),
                                 "useSequence": Qt.binding(function() { 
                                     return (root.enableSequencePlayer && !useExternal && (_reconstruction || (root.displayedNode && root.displayedNode.hasSequenceOutput && (displayedAttr.desc.semantic === "imageList" || displayedAttr.desc.semantic === "sequence"))))
                                 }),
@@ -1177,7 +1175,7 @@ FocusScope {
                             }
                             if (displayPanoramaViewer.checked) {
                                 sfmNode = _reconstruction.activeNodes.get('SfMTransform').node
-                                var previousNode = sfmNode.attribute("input").rootLinkParam.node
+                                var previousNode = sfmNode.attribute("input").inputRootLink.node
                                 return previousNode
                             }
                             return sfmNode
@@ -1446,7 +1444,7 @@ FocusScope {
                                 if (!activeNode.hasAttribute("input"))
                                     return false
                                 var inputAttr = activeNode.attribute("input")
-                                var inputAttrLink = inputAttr.rootLinkParam
+                                var inputAttrLink = inputAttr.inputRootLink
                                 if (!inputAttrLink)
                                     return false
                                 return inputAttrLink.node.isComputed
@@ -1497,7 +1495,7 @@ FocusScope {
                                 var inputAttr = activeNode.attribute("input")
                                 if (!inputAttr)
                                     return false
-                                var inputAttrLink = inputAttr.rootLinkParam
+                                var inputAttrLink = inputAttr.inputRootLink
                                 if (!inputAttrLink)
                                     return false
                                 return inputAttrLink.node.isComputed
@@ -1799,11 +1797,7 @@ FocusScope {
 
         shortcut: "R"
         onTriggered: {
-            if (hdrImageToolbar.channelModeValue !== "r") {
-                hdrImageToolbar.channelModeValue = "r"
-            } else {
-                hdrImageToolbar.channelModeValue = "rgba"
-            }
+            hdrImageToolbar.toggleChannel("r", "rgba")
         }
     }
 
@@ -1812,11 +1806,7 @@ FocusScope {
 
         shortcut: "G"
         onTriggered: {
-            if (hdrImageToolbar.channelModeValue !== "g") {
-                hdrImageToolbar.channelModeValue = "g"
-            } else {
-                hdrImageToolbar.channelModeValue = "rgba"
-            }
+            hdrImageToolbar.toggleChannel("g", "rgba")
         }
     }
 
@@ -1825,11 +1815,7 @@ FocusScope {
 
         shortcut: "B"
         onTriggered: {
-            if (hdrImageToolbar.channelModeValue !== "b") {
-                hdrImageToolbar.channelModeValue = "b"
-            } else {
-                hdrImageToolbar.channelModeValue = "rgba"
-            }
+            hdrImageToolbar.toggleChannel("b", "rgba")
         }
     }
 
@@ -1838,11 +1824,7 @@ FocusScope {
 
         shortcut: "A"
         onTriggered: {
-            if (hdrImageToolbar.channelModeValue !== "a") {
-                hdrImageToolbar.channelModeValue = "a"
-            } else {
-                hdrImageToolbar.channelModeValue = "rgba"
-            }
+            hdrImageToolbar.toggleChannel("a", "rgba")
         }
     }
 

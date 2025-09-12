@@ -113,9 +113,14 @@ Item {
             }
         } else if (event.key === Qt.Key_D) {
             duplicateNode(event.modifiers === Qt.AltModifier)
-        } else if (event.key === Qt.Key_X && event.modifiers === Qt.ControlModifier) {
-            copyNodes()
-            uigraph.removeSelectedNodes()
+        } else if (event.key === Qt.Key_X) {
+            if (event.modifiers === Qt.ControlModifier) {
+                copyNodes()
+                uigraph.removeSelectedNodes()
+            }
+            else {
+                uigraph.disconnectSelectedNodes()
+            }
         } else if (event.key === Qt.Key_C) {
             if (event.modifiers === Qt.ControlModifier) {
                 copyNodes()
@@ -125,6 +130,10 @@ Item {
             }
         } else if (event.key === Qt.Key_V && event.modifiers === Qt.ControlModifier) {
             pasteNodes()
+        } else if (event.key === Qt.Key_V && event.modifiers === Qt.ShiftModifier) {
+            uigraph.alignVertically()
+        } else if (event.key === Qt.Key_H && event.modifiers === Qt.ShiftModifier) {
+            uigraph.alignHorizontally()
         } else if (event.key === Qt.Key_Tab) {
             event.accepted = true
             if (mouseArea.containsMouse) {
@@ -138,6 +147,7 @@ Item {
         id: mouseArea
         anchors.fill: parent
         property double factor: 1.15
+        property bool removingEdges: false;
         // Activate multisampling for edges antialiasing
         layer.enabled: true
         layer.samples: 8
@@ -146,7 +156,7 @@ Item {
         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
         drag.threshold: 0
         drag.smoothed: false
-        cursorShape: drag.target == draggable ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        cursorShape: drag.target == draggable ? Qt.ClosedHandCursor : removingEdges ? Qt.CrossCursor : Qt.ArrowCursor
 
         onWheel: function(wheel) {
             var zoomFactor = wheel.angleDelta.y > 0 ? factor : 1 / factor
@@ -171,9 +181,15 @@ Item {
             if (mouse.button == Qt.MiddleButton || (mouse.button == Qt.LeftButton && mouse.modifiers & Qt.AltModifier)) {
                 drag.target = draggable // start drag
             }
+            if (mouse.button == Qt.LeftButton && (mouse.modifiers & Qt.ControlModifier) && (mouse.modifiers & Qt.AltModifier)) {
+                edgeSelectionLine.startSelection(mouse);
+                removingEdges = true;
+            }
         }
 
         onReleased: {
+            removingEdges = false;
+            edgeSelectionLine.endSelection()
             nodeSelectionBox.endSelection();
             drag.target = null;
             root.forceActiveFocus()
@@ -472,7 +488,12 @@ Item {
                     property bool isValidEdge: src !== undefined && dst !== undefined
                     visible: isValidEdge && src.visible && dst.visible
 
-                    property bool forLoop: src.attribute.type === "ListAttribute" && dst.attribute.type != "ListAttribute"
+                    property bool forLoop: {
+                        if (src !== undefined && dst !== undefined) {
+                            return src.attribute.type === "ListAttribute" && dst.attribute.type != "ListAttribute"
+                        }
+                        return false
+                    }
 
                     property bool inFocus: containsMouse || (edgeMenu.opened && edgeMenu.currentEdge === edge)
 
@@ -497,7 +518,7 @@ Item {
                         if (event.button) {
                             if (canEdit && (event.modifiers & Qt.AltModifier)) {
                                 uigraph.removeEdge(edge)
-                            } else {
+                            } else if (event.button == Qt.RightButton) {
                                 edgeMenu.currentEdge = edge
                                 edgeMenu.forLoop = forLoop
                                 var spawnPosition = mouseArea.mapToItem(draggable, mouseArea.mouseX, mouseArea.mouseY)
@@ -727,6 +748,13 @@ Item {
                         }
                     }
                     MenuItem {
+                        text: "Disconnect Node(s)";
+                        enabled: true;
+                        ToolTip.text: "Disconnect all edges from the selected Node(s)";
+                        ToolTip.visible: hovered;
+                        onTriggered: uigraph.disconnectSelectedNodes();
+                    }
+                    MenuItem {
                         text: "Duplicate Node(s)" + (duplicateFollowingButton.hovered ? " From Here" : "")
                         enabled: true
                         onTriggered: duplicateNode(false)
@@ -858,6 +886,10 @@ Item {
                     onAttributePinCreated: function(attribute, pin) { registerAttributePin(attribute, pin) }
                     onAttributePinDeleted: function(attribute, pin) { unregisterAttributePin(attribute, pin) }
 
+                    onShaked: {
+                        uigraph.disconnectSelectedNodes();
+                    }
+
                     onPressed: function(mouse) {
                         nodeRepeater.updateSelectionOnClick = true;
                         nodeRepeater.ongoingDrag = true;
@@ -953,6 +985,10 @@ Item {
                         if(!selected || !dragging) {
                             return;
                         }
+
+                        // Check for shake on the node
+                        checkForShake();
+
                         // Compute offset between the delegate and the stored node position.
                         const offset = Qt.point(x - node.x, y - node.y);
 
@@ -996,6 +1032,16 @@ Item {
                     selectionMode = ItemSelectionModel.Deselect;
                 }
                 uigraph.selectNodesByIndices(selectedIndices, selectionMode);
+            }
+        }
+
+        DelegateSelectionLine {
+            id: edgeSelectionLine
+            mouseArea: mouseArea
+            modelInstantiator: edgesRepeater
+            container: draggable
+            onDelegateSelectionEnded: function(selectedIndices, modifiers) {
+                uigraph.deleteEdgesByIndices(selectedIndices);
             }
         }
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import sys
 import atexit
 import copy
 import datetime
@@ -11,16 +12,16 @@ import shutil
 import time
 import types
 import uuid
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from enum import Enum, auto
-from typing import Callable, Optional
-
+from typing import Callable, Optional, List
 
 import meshroom
 from meshroom.common import Signal, Variant, Property, BaseObject, Slot, ListModel, DictModel
-from meshroom.core import desc, stats, hashValue, nodeVersion, Version, MrNodeType
+from meshroom.core import desc, plugins, stats, hashValue, nodeVersion, Version, MrNodeType
 from meshroom.core.attribute import attributeFactory, ListAttribute, GroupAttribute, Attribute
 from meshroom.core.exception import NodeUpgradeError, UnknownNodeTypeError
+from meshroom.core.mtyping import PathLike
 
 
 def getWritingFilepath(filepath: str) -> str:
@@ -201,7 +202,7 @@ class StatusData(BaseObject):
         self.mrNodeType = d.get("mrNodeType", MrNodeType.NONE)
         if not isinstance(self.mrNodeType, MrNodeType):
             self.mrNodeType = MrNodeType[self.mrNodeType]
-        
+
         self.nodeName = d.get("nodeName", "")
         self.nodeType = d.get("nodeType", "")
         self.packageName = d.get("packageName", "")
@@ -220,9 +221,11 @@ class StatusData(BaseObject):
 class LogManager:
     dateTimeFormatting = '%H:%M:%S'
 
-    def __init__(self, chunk):
-        self.chunk = chunk
-        self.logger = logging.getLogger(chunk.node.getName())
+    def __init__(self, logger, logFile):
+        self.logger: logging.Logger = logger
+        self.logFile: PathLike = logFile
+        self._previousHandlers: List[logging.Handler] = []
+        self._previousLevel: int = 0
 
     class Formatter(logging.Formatter):
         def format(self, record):
@@ -231,19 +234,29 @@ class LogManager:
             return logging.Formatter.format(self, record)
 
     def configureLogger(self):
+        self._previousLevel = self.logger.level
+        self._previousHandlers = []
         for handler in self.logger.handlers[:]:
+            self._previousHandlers.append(handler)
             self.logger.removeHandler(handler)
-        handler = logging.FileHandler(self.chunk.logFile)
+        handler = logging.FileHandler(self.logFile)
         formatter = self.Formatter('[%(asctime)s.%(msecs)03d][%(levelname)s] %(message)s',
                                    self.dateTimeFormatting)
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
+    def restorePreviousLogger(self):
+        for h in self.logger.handlers[:]:
+            self.logger.removeHandler(h)
+        for h in self._previousHandlers:
+            self.logger.addHandler(h)
+        self.logger.setLevel(self._previousLevel)
+
     def start(self, level):
         # Clear log file
-        open(self.chunk.logFile, 'w').close()
-
+        open(self.logFile, 'w').close()
         self.configureLogger()
+        self.logger.propagate = False
         self.logger.setLevel(self.textToLevel(level))
         self.progressBar = False
 
@@ -260,7 +273,7 @@ class LogManager:
         self.currentProgressTics = 0
         self.progressBar = True
 
-        with open(self.chunk.logFile, 'a') as f:
+        with open(self.logFile, 'a') as f:
             if message:
                 f.write(message+'\n')
             f.write('0%   10   20   30   40   50   60   70   80   90   100%\n')
@@ -268,7 +281,7 @@ class LogManager:
 
             f.close()
 
-        with open(self.chunk.logFile) as f:
+        with open(self.logFile) as f:
             content = f.read()
             self.progressBarPosition = content.rfind('\n')
 
@@ -280,7 +293,7 @@ class LogManager:
 
         tics = round((value/self.progressEnd)*51)
 
-        with open(self.chunk.logFile, 'r+') as f:
+        with open(self.logFile, 'r+') as f:
             text = f.read()
             for i in range(tics-self.currentProgressTics):
                 text = text[:self.progressBarPosition]+'*'+text[self.progressBarPosition:]
@@ -295,8 +308,10 @@ class LogManager:
 
         self.progressBar = False
 
-    def textToLevel(self, text):
-        if text == "critical":
+    @staticmethod
+    def textToLevel(text):
+        text = text.lower()
+        if text in ["critical", "fatal"]:
             return logging.CRITICAL
         elif text == "error":
             return logging.ERROR
@@ -306,6 +321,8 @@ class LogManager:
             return logging.INFO
         elif text == "debug":
             return logging.DEBUG
+        elif text == "trace":
+            return logging.TRACE
         else:
             return logging.NOTSET
 
@@ -324,7 +341,7 @@ class NodeChunk(BaseObject):
         super().__init__(parent)
         self.node = node
         self.range = range
-        self.logManager: LogManager = LogManager(self)
+        self._logManager = None
         self._status: StatusData = StatusData(node.name, node.nodeType, node.packageName,
                                               node.packageVersion, node.getMrNodeType())
         self.statistics: stats.Statistics = stats.Statistics()
@@ -343,6 +360,13 @@ class NodeChunk(BaseObject):
             return f"{self.node.name}({self.index})"
         else:
             return self.node.name
+    
+    @property
+    def logManager(self):
+        if self._logManager is None:
+            logger = logging.getLogger(self.node.getName())
+            self._logManager = LogManager(logger, self.logFile)
+        return self._logManager
 
     @property
     def statusName(self):
@@ -639,10 +663,12 @@ class BaseNode(BaseObject):
         super().__init__(parent)
         self._nodeType: str = nodeType
         self.nodeDesc: desc.BaseNode = None
+        self.nodePlugin: plugins.Plugin = None
 
         # instantiate node description if nodeType is valid
-        if nodeType in meshroom.core.nodesDesc:
-            self.nodeDesc = meshroom.core.nodesDesc[nodeType]()
+        if meshroom.core.pluginManager.getRegisteredNodePlugin(nodeType):
+            self.nodeDesc = meshroom.core.pluginManager.getRegisteredNodePlugin(nodeType).nodeDescriptor()
+            self.nodePlugin = meshroom.core.pluginManager.getRegisteredNodePlugin(nodeType)
 
         self.packageName: str = ""
         self.packageVersion: str = ""
@@ -657,6 +683,7 @@ class BaseNode(BaseObject):
         self._uid: str = uid
         self._cmdVars: dict = {}
         self._size: int = 0
+        self._logManager: Optional[LogManager] = None
         self._position: Position = position or Position()
         self._attributes = DictModel(keyAttrName='name', parent=self)
         self._internalAttributes = DictModel(keyAttrName='name', parent=self)
@@ -702,6 +729,15 @@ class BaseNode(BaseObject):
                 return label
         return self.getDefaultLabel()
 
+    def getNodeLogLevel(self):
+        """
+        Returns:
+            str: the user-provided log level used for logging on process launched by this node
+        """
+        if self.hasInternalAttribute("nodeDefaultLogLevel"):
+            return self.internalAttribute("nodeDefaultLogLevel").value.strip()
+        return "info"
+    
     def getColor(self):
         """
         Returns:
@@ -741,8 +777,38 @@ class BaseNode(BaseObject):
     def getDocumentation(self):
         if not self.nodeDesc:
             return ""
-        return self.nodeDesc.documentation
-
+        if self.nodeDesc.documentation:
+            return self.nodeDesc.documentation
+        else:
+            return self.nodeDesc.__doc__
+    
+    def getNodeInfos(self):
+        if not self.nodeDesc:
+            return []
+        infos = OrderedDict([
+            ("module", self.nodeDesc.__module__),
+            ("modulePath", self.nodeDesc.plugin.path),
+        ])
+        # > Infos from the plugin module
+        plugin_module = sys.modules.get(self.nodeDesc.__module__)
+        if getattr(plugin_module, "__author__", None):
+            infos["author"] = plugin_module.__author__
+        if getattr(plugin_module, "__license__", None):
+            infos["license"] = plugin_module.__license__
+        if getattr(plugin_module, "__version__", None):
+            infos["version"] = plugin_module.__version__
+        # > Overrides at the node-level
+        if getattr(self.nodeDesc, "author", None):
+            infos["author"] = self.nodeDesc.author
+        if getattr(self.nodeDesc, "version", None):
+            infos["version"] = self.nodeDesc.version
+        # > Additional node infos stored in a __nodeInfo__ parameter
+        additionalNodeInfos = getattr(self.nodeDesc, "__nodeInfo__", None)
+        if additionalNodeInfos:
+            for key, value in additionalNodeInfos:
+                infos[key] = value
+        return [{"key": k, "value": v} for k, v in infos.items()]
+    
     @property
     def packageFullName(self):
         return '-'.join([self.packageName, self.packageVersion])
@@ -873,14 +939,14 @@ class BaseNode(BaseObject):
         for attr in self.invalidatingAttributes:
             if not attr.enabled:
                 continue  # Disabled params do not contribute to the uid
-            dynamicOutputAttr = attr.isLink and attr.getLinkParam(recursive=True).desc.isDynamicValue
+            dynamicOutputAttr = attr.isLink and attr.inputRootLink.desc.isDynamicValue
             # For dynamic output attributes, the UID does not depend on the attribute value.
             # In particular, when loading a project file, the UIDs are updated first,
             # and the node status and the dynamic output values are not yet loaded,
             # so we should not read the attribute value.
-            if not dynamicOutputAttr and attr.value == attr.uidIgnoreValue:
+            if not dynamicOutputAttr and attr.value == attr.desc.uidIgnoreValue:
                 continue  # For non-dynamic attributes, check if the value should be ignored
-            uidAttributes.append((attr.getName(), attr.uid()))
+            uidAttributes.append((attr.name, attr.uid()))
         uidAttributes.sort()
 
         # Adding the node type prevents ending up with two identical UIDs for different node types
@@ -895,8 +961,8 @@ class BaseNode(BaseObject):
         """
         def _buildAttributeCmdVars(cmdVars, name, attr):
             if attr.enabled:
-                group = attr.attributeDesc.group(attr.node) \
-                        if isinstance(attr.attributeDesc.group, types.FunctionType) else attr.attributeDesc.group
+                group = attr.desc.group(attr.node) \
+                        if isinstance(attr.desc.group, types.FunctionType) else attr.desc.group
                 if group is not None:
                     # If there is a valid command line "group"
                     v = attr.getValueStr(withQuotes=True)
@@ -942,13 +1008,13 @@ class BaseNode(BaseObject):
                 continue  # skip inputs
 
             # Apply expressions for File attributes
-            if attr.attributeDesc.isExpression:
+            if attr.desc.isExpression:
                 defaultValue = ""
                 # Do not evaluate expression for disabled attributes
                 # (the expression may refer to other attributes that are not defined)
                 if attr.enabled:
                     try:
-                        defaultValue = attr.defaultValue()
+                        defaultValue = attr.getDefaultValue()
                     except AttributeError:
                         # If we load an old scene, the lambda associated to the 'value' could try to
                         # access other params that could not exist yet
@@ -976,8 +1042,8 @@ class BaseNode(BaseObject):
             self._cmdVars[name + 'Value'] = attr.getValueStr(withQuotes=False)
 
             if v:
-                self._cmdVars[attr.attributeDesc.group] = \
-                    self._cmdVars.get(attr.attributeDesc.group, '') + ' ' + self._cmdVars[name]
+                self._cmdVars[attr.desc.group] = \
+                    self._cmdVars.get(attr.desc.group, '') + ' ' + self._cmdVars[name]
 
     @property
     def isParallelized(self):
@@ -1278,6 +1344,24 @@ class BaseNode(BaseObject):
         # Invoke the post process on Client Node to execute after the processing on the
         # node is completed
         self.nodeDesc.postprocess(self)
+
+    def getLogHandlers(self):
+        return self._handlers
+
+    def prepareLogger(self, iteration=-1):
+        # Get file handler path
+        logFileName = "log"
+        if iteration != -1:
+            chunk = self.chunks[iteration]
+            logFileName = str(chunk.index) + ".log"
+        logFile = os.path.join(self.graph.cacheDir, self.internalFolder, logFileName)
+        # Setup logger
+        rootLogger = logging.getLogger()
+        self._logManager = LogManager(rootLogger, logFile)
+        self._logManager.start(self.getNodeLogLevel())
+
+    def restoreLogger(self):
+        self._logManager.restorePreviousLogger()
 
     def updateOutputAttr(self):
         if not self.nodeDesc:
@@ -1618,12 +1702,13 @@ class BaseNode(BaseObject):
         False otherwise.
         """
         
-        return next((attr for attr in self._attributes if attr.enabled and attr.isOutput and attr.is3D), None) is not None
+        return next((attr for attr in self._attributes if attr.enabled and attr.isOutput and attr.is3dDisplayable), None) is not None
 
     name = Property(str, getName, constant=True)
     defaultLabel = Property(str, getDefaultLabel, constant=True)
     nodeType = Property(str, nodeType.fget, constant=True)
     documentation = Property(str, getDocumentation, constant=True)
+    nodeInfos = Property(Variant, getNodeInfos, constant=True)
     positionChanged = Signal()
     position = Property(Variant, position.fget, position.fset, notify=positionChanged)
     x = Property(float, lambda self: self._position.x, notify=positionChanged)
@@ -1758,9 +1843,9 @@ class Node(BaseNode):
                 pass
 
     def toDict(self):
-        inputs = {k: v.getExportValue() for k, v in self._attributes.objects.items() if v.isInput}
-        internalInputs = {k: v.getExportValue() for k, v in self._internalAttributes.objects.items()}
-        outputs = ({k: v.getExportValue() for k, v in self._attributes.objects.items()
+        inputs = {k: v.getSerializedValue() for k, v in self._attributes.objects.items() if v.isInput}
+        internalInputs = {k: v.getSerializedValue() for k, v in self._internalAttributes.objects.items()}
+        outputs = ({k: v.getSerializedValue() for k, v in self._attributes.objects.items()
                     if v.isOutput and not v.desc.isDynamicValue})
 
         return {
@@ -1814,6 +1899,7 @@ class CompatibilityIssue(Enum):
     VersionConflict = 2  # mismatch between node's description version and serialized node data
     DescriptionConflict = 3  # mismatch between node's description attributes and serialized node data
     UidConflict = 4  # mismatch between computed UIDs and UIDs stored in serialized node data
+    PluginIssue = 5  # issue when loading the associated plugin
 
 
 class CompatibilityNode(BaseNode):
@@ -2009,14 +2095,14 @@ class CompatibilityNode(BaseNode):
         # if node has not been added to a graph, return serialized node inputs
         if not self.graph:
             return self._inputs
-        return {k: v.getExportValue() for k, v in self._attributes.objects.items() if v.isInput}
+        return {k: v.getSerializedValue() for k, v in self._attributes.objects.items() if v.isInput}
 
     @property
     def internalInputs(self):
         """ Get current node's internal attributes """
         if not self.graph:
             return self._internalInputs
-        return {k: v.getExportValue() for k, v in self._internalAttributes.objects.items()}
+        return {k: v.getSerializedValue() for k, v in self._internalAttributes.objects.items()}
 
     def toDict(self):
         """

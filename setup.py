@@ -35,6 +35,8 @@ class PlatformExecutable(Executable):
         icon = icons.get(platform.system(), None) if icons else None
         if platform.system() in (self.Linux, self.Darwin):
             initScript = os.path.join(currentDir, "setupInitScriptUnix.py")
+        elif platform.system() is self.Windows:
+            initScript = os.path.join(currentDir, "setupInitScriptWindows.py")
         super(PlatformExecutable, self).__init__(script, initScript, base, targetName, icon, shortcutName,
                                                  shortcutDir, copyright, trademarks)
 
@@ -44,8 +46,19 @@ build_exe_options = {
     "packages": ["meshroom.nodes", "meshroom.submitters"],
     "includes": [
         "idna.idnadata",  # Dependency needed by SketchfabUpload node, but not detected by cx_Freeze
+        "timeit",
+        "pickletools",
+        "modulefinder",
+        "cProfile",
+        "colorsys",
+        "xml.dom.minidom",
+        "http.cookies",
+        "filecmp",
+        "logging.handlers",
+        "cmath",
+        "numpy"
     ],
-    "include_files": ["CHANGES.md", "COPYING.md", "LICENSE-MPL2.md", "README.md"]
+    "include_files": ["CHANGES.md", "COPYING.md", "LICENSE-MPL2.md", "README.md", "bin"]
 }
 if os.path.isdir(os.path.join(currentDir, "tractor")):
     build_exe_options["packages"].append("tractor")
@@ -130,9 +143,9 @@ executables = [
 setup(
     name="Meshroom",
     description="Meshroom",
-    install_requires=['psutil', 'pytest', 'PySide6', 'markdown'],
+    install_requires=["psutil", "PySide6", "markdown"],
     setup_requires=[
-        'cx_Freeze'
+        "cx_Freeze"
     ],
     version=meshroom.__version__,
     options={"build_exe": build_exe_options},

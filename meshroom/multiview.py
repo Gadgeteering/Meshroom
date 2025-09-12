@@ -1,7 +1,7 @@
 import os
 
 # Supported image extensions
-imageExtensions = (
+imageExtensions = [
     # bmp:
     '.bmp',
     # cineon:
@@ -57,21 +57,23 @@ imageExtensions = (
     '.zfile',
     # osl:
     '.osl', '.oso', '.oslgroup', '.oslbody',
-    )
-videoExtensions = (
+    ]
+videoExtensions = [
     '.avi', '.mov', '.qt',
     '.mkv', '.webm',
     '.mp4', '.mpg', '.mpeg', '.m2v', '.m4v',
     '.wmv',
     '.ogv', '.ogg',
     '.mxf',
-    )
-panoramaInfoExtensions = ('.xml')
-meshroomSceneExtensions = ('.mg')
+    ]
+panoramaInfoExtensions = ['.xml']
+meshroomSceneExtensions = ['.mg']
 
 
 def hasExtension(filepath, extensions):
     """ Return whether filepath is one of the following extensions. """
+    if os.path.isdir(filepath):
+        return False
     return os.path.splitext(filepath)[1].lower() in extensions
 
 
@@ -134,106 +136,32 @@ def findFilesByTypeInFolder(folder, recursive=False):
             continue
         elif os.path.isdir(currentFolder):
             if recursive:
+                # Get through all of the depth levels
                 for root, directories, files in os.walk(currentFolder):
                     for filename in files:
                         output.addFile(os.path.join(root, filename))
             else:
-                output.addFiles([os.path.join(currentFolder, filename) for filename in os.listdir(currentFolder)])
+                # Only get the first level of depth, so top-level folders'
+                # files will be added, if they exist.
+                # This may prevent from importing nothing at all when files
+                # are nested a level down
+                try:
+                    root, directories, files = next(os.walk(currentFolder))
+                    output.addFiles([os.path.join(root, file) for file in files])
+                    for directory in directories:
+                        for file in os.listdir(os.path.join(root, directory)):
+                            filepath = os.path.join(root, directory, file)
+                            if os.path.isfile(filepath):
+                                output.addFile(filepath)
+                except (StopIteration, OSError):
+                    # Directory empty or inaccessible, skip processing
+                    pass
+
         else:
-            # if not a directory or a file, it may be an expression
+            # If not a directory or a file, it may be an expression
             import glob
             paths = glob.glob(currentFolder)
             filesByType = findFilesByTypeInFolder(paths, recursive=recursive)
             output.extend(filesByType)
 
     return output
-
-
-def mvsPipeline(graph, sfm=None):
-    """
-    Instantiate a MVS pipeline inside 'graph'.
-
-    Args:
-        graph (Graph/UIGraph): the graph in which nodes should be instantiated
-        sfm (Node, optional): if specified, connect the MVS pipeline to this StructureFromMotion node
-
-    Returns:
-        list of Node: the created nodes
-    """
-    if sfm and not sfm.nodeType == "StructureFromMotion":
-        raise ValueError(f"Invalid node type. Expected StructureFromMotion, got {sfm.nodeType}.")
-
-    prepareDenseScene = graph.addNewNode('PrepareDenseScene',
-                                         input=sfm.output if sfm else "")
-    depthMap = graph.addNewNode('DepthMap',
-                                input=prepareDenseScene.input,
-                                imagesFolder=prepareDenseScene.output)
-    depthMapFilter = graph.addNewNode('DepthMapFilter',
-                                      input=depthMap.input,
-                                      depthMapsFolder=depthMap.output)
-    meshing = graph.addNewNode('Meshing',
-                               input=depthMapFilter.input,
-                               depthMapsFolder=depthMapFilter.output)
-    meshFiltering = graph.addNewNode('MeshFiltering',
-                                     inputMesh=meshing.outputMesh)
-    texturing = graph.addNewNode('Texturing',
-                                 input=meshing.output,
-                                 imagesFolder=depthMap.imagesFolder,
-                                 inputMesh=meshFiltering.outputMesh)
-
-    return [
-        prepareDenseScene,
-        depthMap,
-        depthMapFilter,
-        meshing,
-        meshFiltering,
-        texturing
-    ]
-
-
-def sfmAugmentation(graph, sourceSfm, withMVS=False):
-    """
-    Create a SfM augmentation inside 'graph'.
-
-    Args:
-        graph (Graph/UIGraph): the graph in which nodes should be instantiated
-        sourceSfm (Node, optional): if specified, connect the MVS pipeline to this StructureFromMotion node
-        withMVS (bool): whether to create a MVS pipeline after the augmented SfM branch
-
-    Returns:
-        tuple: the created nodes (sfmNodes, mvsNodes)
-    """
-    cameraInit = graph.addNewNode('CameraInit')
-
-    featureExtraction = graph.addNewNode('FeatureExtraction',
-                                         input=cameraInit.output)
-    imageMatchingMulti = graph.addNewNode('ImageMatchingMultiSfM',
-                                          input=featureExtraction.input,
-                                          featuresFolders=[featureExtraction.output]
-                                          )
-    featureMatching = graph.addNewNode('FeatureMatching',
-                                       input=imageMatchingMulti.outputCombinedSfM,
-                                       featuresFolders=imageMatchingMulti.featuresFolders,
-                                       imagePairsList=imageMatchingMulti.output,
-                                       describerTypes=featureExtraction.describerTypes)
-    structureFromMotion = graph.addNewNode('StructureFromMotion',
-                                           input=featureMatching.input,
-                                           featuresFolders=featureMatching.featuresFolders,
-                                           matchesFolders=[featureMatching.output],
-                                           describerTypes=featureMatching.describerTypes)
-    graph.addEdge(sourceSfm.output, imageMatchingMulti.inputB)
-
-    sfmNodes = [
-        cameraInit,
-        featureExtraction,
-        imageMatchingMulti,
-        featureMatching,
-        structureFromMotion
-    ]
-
-    mvsNodes = []
-
-    if withMVS:
-        mvsNodes = mvsPipeline(graph, structureFromMotion)
-
-    return sfmNodes, mvsNodes

@@ -9,13 +9,15 @@ import shutil
 import sys
 
 from .computation import Level, StaticNodeSize
-from .attribute import StringParam, ColorParam
+from .attribute import StringParam, ColorParam, ChoiceParam
 
 import meshroom
 from meshroom.core import cgroup
+from meshroom.core.utils import VERBOSE_LEVEL
 
-_MESHROOM_ROOT = Path(meshroom.__file__).parent.parent
-_MESHROOM_COMPUTE = _MESHROOM_ROOT / "bin" / "meshroom_compute"
+_MESHROOM_ROOT = Path(meshroom.__file__).parent.parent.as_posix()
+_MESHROOM_COMPUTE = (Path(_MESHROOM_ROOT) / "bin" / "meshroom_compute").as_posix()
+_MESHROOM_COMPUTE_EXE = f"python {_MESHROOM_COMPUTE}"
 
 
 class MrNodeType(enum.Enum):
@@ -32,15 +34,17 @@ class BaseNode(object):
     cpu = Level.NORMAL
     gpu = Level.NONE
     ram = Level.NORMAL
-    packageName = ''
-    packageVersion = ''
+    packageName = ""
+    packageVersion = ""
     internalInputs = [
         StringParam(
             name="invalidation",
             label="Invalidation Message",
             description="A message that will invalidate the node's output folder.\n"
-                        "This is useful for development, we can invalidate the output of the node when we modify the code.\n"
-                        "It is displayed in bold font in the invalidation/comment messages tooltip.",
+                        "This is useful for development, we can invalidate the output of the node "
+                        "when we modify the code.\n"
+                        "It is displayed in bold font in the invalidation/comment messages "
+                        "tooltip.",
             value="",
             semantic="multiline",
             advanced=True,
@@ -50,7 +54,8 @@ class BaseNode(object):
             name="comment",
             label="Comments",
             description="User comments describing this specific node instance.\n"
-                        "It is displayed in regular font in the invalidation/comment messages tooltip.",
+                        "It is displayed in regular font in the invalidation/comment messages "
+                        "tooltip.",
             value="",
             semantic="multiline",
             invalidate=False,
@@ -58,8 +63,17 @@ class BaseNode(object):
         StringParam(
             name="label",
             label="Node's Label",
-            description="Customize the default label (to replace the technical name of the node instance).",
+            description="Customize the default label (to replace the technical name of the node "
+                        "instance).",
             value="",
+            invalidate=False,
+        ),
+        ChoiceParam(
+            name="nodeDefaultLogLevel",
+            label="Default Logging Level",
+            description="Default logging level for the node (critical, error, warning, info, debug).",
+            value="info",
+            values=VERBOSE_LEVEL,
             invalidate=False,
         ),
         ColorParam(
@@ -74,8 +88,9 @@ class BaseNode(object):
     outputs = []
     size = StaticNodeSize(1)
     parallelization = None
-    documentation = ''
-    category = 'Other'
+    documentation = ""
+    category = "Other"
+    plugin = None
 
     def __init__(self):
         super(BaseNode, self).__init__()
@@ -143,14 +158,14 @@ class BaseNode(object):
                 chunk.saveStatusFile()
                 cmdList = shlex.split(cmd)
                 # Resolve executable to full path
-                prog = shutil.which(cmdList[0], path=env.get('PATH') if env else None)
+                prog = shutil.which(cmdList[0], path=env.get("PATH") if env else None)
 
                 print(f"Starting Process for '{chunk.node.name}'")
-                print(f' - commandLine: {cmd}')
-                print(f' - logFile: {chunk.logFile}')
+                print(f" - commandLine: {cmd}")
+                print(f" - logFile: {chunk.logFile}")
                 if prog:
-                    cmdList[0] = prog
-                    print(f' - command full path: {prog}')
+                    cmdList[0] = Path(prog).as_posix()
+                    print(f" - command full path: {cmdList[0]}")
 
                 # Change the process group to avoid Meshroom main process being killed if the
                 # subprocess gets terminated by the user or an Out Of Memory (OOM kill).
@@ -192,8 +207,8 @@ class BaseNode(object):
                         pass
 
             if chunk.subprocess.returncode != 0:
-                with open(chunk.logFile, 'r') as logF:
-                    logContent = ''.join(logF.readlines())
+                with open(chunk.logFile, "r") as logF:
+                    logContent = "".join(logF.readlines())
                 raise RuntimeError(f'Error on node "{chunk.name}":\nLog:\n{logContent}')
         finally:
             chunk.subprocess = None
@@ -250,20 +265,23 @@ class Node(BaseNode):
         return MrNodeType.NODE
 
     def processChunkInEnvironment(self, chunk):
-        meshroomComputeCmd = f"python {_MESHROOM_COMPUTE} {chunk.node.graph.filepath} --node {chunk.node.name} --extern --inCurrentEnv"
+        meshroomComputeCmd = f"{_MESHROOM_COMPUTE_EXE} \"{chunk.node.graph.filepath}\" --node {chunk.node.name} --extern --inCurrentEnv"
+
         if len(chunk.node.getChunks()) > 1:
             meshroomComputeCmd += f" --iteration {chunk.range.iteration}"
 
-        runtimeEnv = None
-        self.executeChunkCommandLine(chunk, meshroomComputeCmd, env=runtimeEnv)
+        runtimeEnv = chunk.node.nodeDesc.plugin.runtimeEnv
+        cmdPrefix = chunk.node.nodeDesc.plugin.commandPrefix
+        cmdSuffix = chunk.node.nodeDesc.plugin.commandSuffix
+        self.executeChunkCommandLine(chunk, cmdPrefix + meshroomComputeCmd + cmdSuffix, env=runtimeEnv)
 
 
 class CommandLineNode(BaseNode):
     """
     """
-    commandLine = ''  # need to be defined on the node
+    commandLine = ""  # need to be defined on the node
     parallelization = None
-    commandLineRange = ''
+    commandLineRange = ""
 
     def __init__(self):
         super(CommandLineNode, self).__init__()
@@ -271,45 +289,45 @@ class CommandLineNode(BaseNode):
     def getMrNodeType(self):
         return MrNodeType.COMMANDLINE
 
-    def buildCommandLine(self, chunk):
-        cmdPrefix = ''
-        cmdSuffix = ''
+    def buildCommandLine(self, chunk) -> str:
+        cmdPrefix = chunk.node.nodeDesc.plugin.commandPrefix
+        cmdSuffix = chunk.node.nodeDesc.plugin.commandSuffix
         if chunk.node.isParallelized and chunk.node.size > 1:
-            cmdSuffix = ' ' + self.commandLineRange.format(**chunk.range.toDict())
+            cmdSuffix = " " + self.commandLineRange.format(**chunk.range.toDict()) + " " + cmdSuffix
 
         return cmdPrefix + chunk.node.nodeDesc.commandLine.format(**chunk.node._cmdVars) + cmdSuffix
 
     def processChunk(self, chunk):
         cmd = self.buildCommandLine(chunk)
-        # TODO: Setup runtime env
-        self.executeChunkCommandLine(chunk, cmd)
+        runtimeEnv = chunk.node.nodeDesc.plugin.runtimeEnv
+        self.executeChunkCommandLine(chunk, cmd, env=runtimeEnv)
 
 
 # Specific command line node for AliceVision apps
 class AVCommandLineNode(CommandLineNode):
 
     cgroupParsed = False
-    cmdMem = ''
-    cmdCore = ''
+    cmdMem = ""
+    cmdCore = ""
 
     def __init__(self):
         super(AVCommandLineNode, self).__init__()
 
         if AVCommandLineNode.cgroupParsed is False:
 
-            AVCommandLineNode.cmdMem = ''
+            AVCommandLineNode.cmdMem = ""
             memSize = cgroup.getCgroupMemorySize()
             if memSize > 0:
-                AVCommandLineNode.cmdMem = f' --maxMemory={memSize}'
+                AVCommandLineNode.cmdMem = f" --maxMemory={memSize}"
 
-            AVCommandLineNode.cmdCore = ''
+            AVCommandLineNode.cmdCore = ""
             coresCount = cgroup.getCgroupCpuCount()
             if coresCount > 0:
-                AVCommandLineNode.cmdCore = f' --maxCores={coresCount}'
+                AVCommandLineNode.cmdCore = f" --maxCores={coresCount}"
 
             AVCommandLineNode.cgroupParsed = True
 
-    def buildCommandLine(self, chunk):
+    def buildCommandLine(self, chunk) -> str:
         commandLineString = super(AVCommandLineNode, self).buildCommandLine(chunk)
 
         return commandLineString + AVCommandLineNode.cmdMem + AVCommandLineNode.cmdCore

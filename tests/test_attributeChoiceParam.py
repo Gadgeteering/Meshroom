@@ -1,5 +1,7 @@
-from meshroom.core import desc, registerNodeType, unregisterNodeType
+from meshroom.core import desc
 from meshroom.core.graph import Graph, loadGraph
+
+from .utils import registerNodeDesc, unregisterNodeDesc
 
 
 class NodeWithChoiceParams(desc.Node):
@@ -25,6 +27,7 @@ class NodeWithChoiceParams(desc.Node):
             exposed=True,
         ),
     ]
+
 
 class NodeWithChoiceParamsSavingValuesOverride(desc.Node):
     inputs = [
@@ -52,13 +55,14 @@ class NodeWithChoiceParamsSavingValuesOverride(desc.Node):
 
 
 class TestChoiceParam:
+
     @classmethod
     def setup_class(cls):
-        registerNodeType(NodeWithChoiceParams)
+        registerNodeDesc(NodeWithChoiceParams)
 
     @classmethod
     def teardown_class(cls):
-        unregisterNodeType(NodeWithChoiceParams)
+        unregisterNodeDesc(NodeWithChoiceParams)
 
     def test_customValueIsSerialized(self, graphSavedOnDisk):
         graph: Graph = graphSavedOnDisk
@@ -84,7 +88,7 @@ class TestChoiceParam:
         graph: Graph = graphSavedOnDisk
         node = graph.addNewNode(NodeWithChoiceParams.__name__)
         node.choice.values = ["D", "E", "F"]
-        
+
         graph.save()
         loadedGraph = loadGraph(graph.filepath)
 
@@ -112,18 +116,19 @@ class TestChoiceParam:
         loadedGraph = loadGraph(graph.filepath)
         loadedNodeA = loadedGraph.node(nodeA.name)
         loadedNodeB = loadedGraph.node(nodeB.name)
-        assert loadedNodeB.choice.linkParam == loadedNodeA.choice
-        assert loadedNodeB.choiceMulti.linkParam == loadedNodeA.choiceMulti
+        assert loadedNodeB.choice.inputLink == loadedNodeA.choice
+        assert loadedNodeB.choiceMulti.inputLink == loadedNodeA.choiceMulti
 
 
 class TestChoiceParamSavingCustomValues:
+
     @classmethod
     def setup_class(cls):
-        registerNodeType(NodeWithChoiceParamsSavingValuesOverride)
+        registerNodeDesc(NodeWithChoiceParamsSavingValuesOverride)
 
     @classmethod
     def teardown_class(cls):
-        unregisterNodeType(NodeWithChoiceParamsSavingValuesOverride)
+        unregisterNodeDesc(NodeWithChoiceParamsSavingValuesOverride)
 
     def test_customValueIsSerialized(self, graphSavedOnDisk):
         graph: Graph = graphSavedOnDisk
@@ -137,13 +142,12 @@ class TestChoiceParamSavingCustomValues:
         assert loadedGraph.node(node.name).choice.value == "CustomValue"
         assert loadedGraph.node(node.name).choiceMulti.value == ["custom", "value"]
 
-
     def test_overridenValuesAreSerialized(self, graphSavedOnDisk):
         graph: Graph = graphSavedOnDisk
         node = graph.addNewNode(NodeWithChoiceParamsSavingValuesOverride.__name__)
         node.choice.values = ["D", "E", "F"]
         node.choiceMulti.values = ["D", "E", "F"]
-        
+
         graph.save()
         loadedGraph = loadGraph(graph.filepath)
 
@@ -151,7 +155,6 @@ class TestChoiceParamSavingCustomValues:
 
         assert loadedNode.choice.values == ["D", "E", "F"]
         assert loadedNode.choiceMulti.values == ["D", "E", "F"]
-
 
     def test_connectionsAreSerialized(self, graphSavedOnDisk):
         graph: Graph = graphSavedOnDisk
@@ -165,5 +168,5 @@ class TestChoiceParamSavingCustomValues:
         loadedGraph = loadGraph(graph.filepath)
         loadedNodeA = loadedGraph.node(nodeA.name)
         loadedNodeB = loadedGraph.node(nodeB.name)
-        assert loadedNodeB.choice.linkParam == loadedNodeA.choice
-        assert loadedNodeB.choiceMulti.linkParam == loadedNodeA.choiceMulti
+        assert loadedNodeB.choice.inputLink == loadedNodeA.choice
+        assert loadedNodeB.choiceMulti.inputLink == loadedNodeA.choiceMulti

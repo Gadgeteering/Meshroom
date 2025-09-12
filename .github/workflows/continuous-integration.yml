@@ -24,9 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [ 3.9.13 ]
-    env:
-      MESHROOM_NODES_PATH: '${{ github.workspace }}/../meshroomNodes/meshroom/nodes'
+        python-version: [ 3.11 ]
 
     steps:
     - uses: actions/checkout@v3
@@ -34,11 +32,6 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Clone meshroomNodes
-      run: |
-        cd ..
-        git clone https://github.com/alicevision/meshroomNodes.git
-        cd ${{ github.workspace }}
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -68,9 +61,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: [ 3.9.13 ]
-    env:
-      MESHROOM_NODES_PATH: '${{ github.workspace }}/../meshroomNodes/meshroom/nodes'
+        python-version: [ 3.11 ]
 
     steps:
       - uses: actions/checkout@v3
@@ -78,11 +69,6 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Clone meshroomNodes
-        run: |
-          cd ..
-          git clone https://github.com/alicevision/meshroomNodes.git
-          cd ${{ github.workspace }}
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

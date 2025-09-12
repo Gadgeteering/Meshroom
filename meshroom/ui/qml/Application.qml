@@ -5,7 +5,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
 
-import Qt.labs.platform 1.0 as Platform
+import Qt.labs.platform as Platform
 import QtQuick.Dialogs
 
 import GraphEditor 1.0
@@ -33,7 +33,6 @@ Page {
     Settings {
         id: settingsUILayout
         category: "UILayout"
-        property alias showLiveReconstruction: liveSfMVisibilityCB.checked
         property alias showGraphEditor: graphEditorVisibilityCB.checked
         property alias showImageViewer: imageViewerVisibilityCB.checked
         property alias showViewer3D: viewer3DVisibilityCB.checked
@@ -132,7 +131,6 @@ Page {
     // File dialogs
     Platform.FileDialog {
         id: saveFileDialog
-        options: Platform.FileDialog.DontUseNativeDialog
 
         property var _callback: undefined
 
@@ -178,7 +176,6 @@ Page {
 
     Platform.FileDialog {
         id: saveTemplateDialog
-        options: Platform.FileDialog.DontUseNativeDialog
 
         signal closed(var result)
 
@@ -202,7 +199,6 @@ Page {
 
     Platform.FileDialog {
         id: loadTemplateDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Load Template"
         nameFilters: ["Meshroom Graphs (*.mg)"]
         onAccepted: {
@@ -215,7 +211,6 @@ Page {
 
     Platform.FileDialog {
         id: importImagesDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Import Images"
         fileMode: Platform.FileDialog.OpenFiles
         nameFilters: []
@@ -228,7 +223,6 @@ Page {
 
     Platform.FileDialog {
         id: importProjectDialog
-        options: Platform.FileDialog.DontUseNativeDialog
         title: "Import Project"
         fileMode: Platform.FileDialog.OpenFile
         nameFilters: ["Meshroom Graphs (*.mg)"]
@@ -553,6 +547,16 @@ Page {
     }
 
     Action {
+        id: reloadPluginsAction
+        property string tooltip: "Reload the source code for all nodes from all registered plugins"
+        text: "Reload Plugins Source Code"
+        shortcut: "Ctrl+Shift+R"
+        onTriggered: {
+            _reconstruction.reloadPlugins()
+        }
+    }
+
+    Action {
         id: undoAction
 
         property string tooltip: 'Undo "' + (_reconstruction ? _reconstruction.undoStack.undoText : "Unknown") + '"'
@@ -830,6 +834,12 @@ Page {
                         ToolTip.visible: hovered
                         ToolTip.text: removeImagesFromAllGroupsAction.tooltip
                     }
+
+                    MenuItem {
+                        action: reloadPluginsAction
+                        ToolTip.visible: hovered
+                        ToolTip.text: reloadPluginsAction.tooltip
+                    }
                 }
                 MenuSeparator { }
                 Action {
@@ -841,27 +851,27 @@ Page {
                 title: "Edit"
                 MenuItem {
                     action: undoAction
-                    ToolTip.visible: hovered
+                    ToolTip.visible: hovered && undoAction.enabled
                     ToolTip.text: undoAction.tooltip
                 }
                 MenuItem {
                     action: redoAction
-                    ToolTip.visible: hovered
+                    ToolTip.visible: hovered && redoAction.enabled
                     ToolTip.text: redoAction.tooltip
                 }
                 MenuItem {
                     action: cutAction
-                    ToolTip.visible: hovered
+                    ToolTip.visible: hovered && cutAction.enabled
                     ToolTip.text: cutAction.tooltip
                 }
                 MenuItem {
                     action: copyAction
-                    ToolTip.visible: hovered
+                    ToolTip.visible: hovered && copyAction.enabled
                     ToolTip.text: copyAction.tooltip
                 }
                 MenuItem {
                     action: pasteAction
-                    ToolTip.visible: hovered
+                    ToolTip.visible: hovered && pasteAction.enabled
                     ToolTip.text: pasteAction.tooltip
                 }
             }
@@ -872,12 +882,6 @@ Page {
                     text: "Graph Editor"
                     checkable: true
                     checked: true
-                }
-                MenuItem {
-                    id: liveSfMVisibilityCB
-                    text: "Live Reconstruction"
-                    checkable: true
-                    checked: false
                 }
                 MenuItem {
                     id: imageViewerVisibilityCB
@@ -909,18 +913,18 @@ Page {
             Menu {
                 title: "Process"
                 Action {
-                    text: "Compute all nodes"
+                    text: "Compute All Nodes"
                     onTriggered: computeManager.compute(null)
                     enabled: _reconstruction ? !_reconstruction.computingLocally : false
                 }
                 Action {
-                    text: "Submit all nodes"
+                    text: "Submit All Nodes"
                     onTriggered: computeManager.submit(null)
                     enabled: _reconstruction ? _reconstruction.canSubmit : false
                 }
                 MenuSeparator {}
                 Action {
-                    text: "Stop computation"
+                    text: "Stop Computation"
                     onTriggered: _reconstruction.stopExecution()
                     enabled: _reconstruction ? _reconstruction.computingLocally : false
                 }
@@ -1135,7 +1139,7 @@ Page {
                 function viewAttributeInViewer(mouse, attribute) {
                     /* Display the current attribute in the corresponding viewer */
 
-                    if (attribute.is2D) {
+                    if (attribute.is2dDisplayable) {
                         workspaceView.viewIn2D(attribute, mouse)
                     }
 

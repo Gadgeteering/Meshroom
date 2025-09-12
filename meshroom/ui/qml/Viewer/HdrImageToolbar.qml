@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 import Controls 1.0
+import Utils 1.0
 
 FloatingPane {
     id: root
@@ -16,8 +17,8 @@ FloatingPane {
 
 
     property real slidersPowerValue: 4.0
-    property real gainValue: Math.pow(gainCtrl.value, slidersPowerValue)
-    property real gammaValue: Math.pow(gammaCtrl.value, slidersPowerValue)
+    property real gainValue: Math.pow(gainCtrl.value, slidersPowerValue).toFixed(2)
+    property real gammaValue: Math.pow(gammaCtrl.value, slidersPowerValue).toFixed(2)
     property alias channelModeValue: channelsCtrl.value
     property variant colorRGBA: null
     property variant mousePosition: ({x:0, y:0})
@@ -37,6 +38,34 @@ FloatingPane {
     function resetPixelCoordinates() {
         if(userDefinedXPixel !== null) { userDefinedXPixel = null }
         if(userDefinedYPixel !== null) { userDefinedYPixel = null }        
+    }
+
+    function toggleChannel(channelName, defaultChannel) {
+        /* 
+            toggle channelBox to the given channelName.
+            If the channel is already set, the defaultChannel is set
+
+         */
+        if (!setChannel(channelName)) {
+            setChannel(defaultChannel)
+        }
+    }
+
+    function setChannel(channelName) {
+        /* 
+            set the given channel in the combobox
+         */
+        if (channelName === channelsCtrl.value) {
+            return false
+        }
+
+        const channelIndex = channelsCtrl.channels.indexOf(channelName)
+        if (channelIndex === -1 ) { 
+            return false 
+        }
+
+        channelsCtrl.currentIndex = channelIndex
+        return true
     }
 
     onMousePositionChanged: {
@@ -84,21 +113,32 @@ FloatingPane {
 
                 onClicked: {
                     gainCtrl.value = gainDefaultValue
+                    gainLabel.reset(gainValue)
                 }
             }
-            TextField {
+            ExpressionTextField {
                 id: gainLabel
 
                 ToolTip.visible: ToolTip.text && hovered
                 ToolTip.delay: 100
                 ToolTip.text: "Color Gain (in linear colorspace)"
 
-                text: gainValue.toFixed(2)
+                text: gainValue
+                decimals: 2
                 Layout.preferredWidth: textMetrics_gainValue.width
                 selectByMouse: true
-                validator: doubleValidator
                 onAccepted: {
-                    gainCtrl.value = Math.pow(Number(gainLabel.text), 1.0 / slidersPowerValue)
+                    if (!gainLabel.hasExprError) {
+                        if (gainLabel.evaluatedValue <= 0) {
+                            gainLabel.evaluatedValue = 0
+                            gainCtrl.value = gainLabel.evaluatedValue
+                        } else {
+                            gainCtrl.value = Math.pow(Number(gainLabel.evaluatedValue), 1.0 / slidersPowerValue)
+                        }
+                    } else {
+                        gainLabel.evaluatedValue = 0
+                        gainCtrl.value = gainLabel.evaluatedValue
+                    }
                 }
             }
             Slider {
@@ -108,6 +148,7 @@ FloatingPane {
                 to: 2
                 value: gainDefaultValue
                 stepSize: 0.01
+                onMoved: gainLabel.reset(Math.pow(value, slidersPowerValue))
             }
         }
 
@@ -124,21 +165,32 @@ FloatingPane {
 
                 onClicked: {
                     gammaCtrl.value = gammaDefaultValue;
+                    gammaLabel.reset(gammaValue)
                 }
             }
-            TextField {
+            ExpressionTextField {
                 id: gammaLabel
 
                 ToolTip.visible: ToolTip.text && hovered
                 ToolTip.delay: 100
                 ToolTip.text: "Apply Gamma (after Gain and in linear colorspace)"
 
-                text: gammaValue.toFixed(2)
+                text: gammaValue
+                decimals: 2
                 Layout.preferredWidth: textMetrics_gainValue.width
                 selectByMouse: true
-                validator: doubleValidator
                 onAccepted: {
-                    gammaCtrl.value = Math.pow(Number(gammaLabel.text), 1.0 / slidersPowerValue)
+                    if (!gammaLabel.hasExprError) {
+                        if (gammaLabel.evaluatedValue <= 0) {
+                            gammaLabel.evaluatedValue = 0
+                            gammaCtrl.value = gammaLabel.evaluatedValue
+                        } else {
+                            gammaCtrl.value = Math.pow(Number(gammaLabel.evaluatedValue), 1.0 / slidersPowerValue)
+                        }
+                    } else {
+                        gainLabel.evaluatedValue = 0
+                        gainCtrl.value = gainLabel.evaluatedValue
+                    }
                 }
             }
             Slider {
@@ -148,6 +200,7 @@ FloatingPane {
                 to: 2
                 value: gammaDefaultValue
                 stepSize: 0.01
+                onMoved: gammaLabel.reset(Math.pow(value, slidersPowerValue))
             }
         }
 

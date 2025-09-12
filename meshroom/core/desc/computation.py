@@ -11,10 +11,11 @@ class Level(Enum):
 
 
 class Range:
-    def __init__(self, iteration=0, blockSize=0, fullSize=0):
+    def __init__(self, iteration=0, blockSize=0, fullSize=0, nbBlocks=0):
         self.iteration = iteration
         self.blockSize = blockSize
         self.fullSize = fullSize
+        self.nbBlocks = nbBlocks
 
     @property
     def start(self):
@@ -42,6 +43,7 @@ class Range:
             "rangeBlockSize": self.blockSize,
             "rangeEffectiveBlockSize": self.effectiveBlockSize,
             "rangeFullSize": self.fullSize,
+            "rangeBlocksCount": self.nbBlocks
             }
 
 
@@ -66,13 +68,13 @@ class Parallelization:
 
     def getRange(self, node, iteration):
         blockSize, fullSize, nbBlocks = self.getSizes(node)
-        return Range(iteration=iteration, blockSize=blockSize, fullSize=fullSize)
+        return Range(iteration=iteration, blockSize=blockSize, fullSize=fullSize, nbBlocks=nbBlocks)
 
     def getRanges(self, node):
         blockSize, fullSize, nbBlocks = self.getSizes(node)
         ranges = []
         for i in range(nbBlocks):
-            ranges.append(Range(iteration=i, blockSize=blockSize, fullSize=fullSize))
+            ranges.append(Range(iteration=i, blockSize=blockSize, fullSize=fullSize, nbBlocks=nbBlocks))
         return ranges
 
 
@@ -90,7 +92,7 @@ class DynamicNodeSize(object):
         param = node.attribute(self._param)
         # Link: use linked node's size
         if param.isLink:
-            return param.getLinkParam().node.size
+            return param.inputLink.node.size
         # ListAttribute: use list size
         if isinstance(param.desc, ListAttribute):
             return len(param)
@@ -118,7 +120,7 @@ class MultiDynamicNodeSize(object):
         for param in self._params:
             param = node.attribute(param)
             if param.isLink:
-                size += param.getLinkParam().node.size
+                size += param.inputLink.node.size
             elif isinstance(param.desc, ListAttribute):
                 size += len(param)
             else:
